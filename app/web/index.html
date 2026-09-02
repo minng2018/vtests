@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vtests</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #121b2e;
+      --line: #243049;
+      --text: #e8eefc;
+      --muted: #8ea0c0;
+      --accent: #3ee0b2;
+      --warn: #f5b942;
+      --danger: #ff6b7a;
+      --ok: #3ee0b2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #16324d 0%, var(--bg) 50%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 28px 18px 60px; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: .04em; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .spacer { flex: 1; }
+    .card {
+      background: color-mix(in srgb, var(--card) 92%, black);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 18px;
+      margin-top: 16px;
+    }
+    label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    input[type=password], input[type=number], input[type=time], input[type=text] {
+      width: 100%;
+      background: #0c1424;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 15px;
+    }
+    input[type=range] { width: 100%; }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: #06231a;
+    }
+    button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+    button.danger { background: var(--danger); color: #2b0006; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .pill.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+    .pill.off { color: var(--warn); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .metric { font-size: 28px; font-weight: 700; }
+    .bar { height: 8px; background: #0c1424; border-radius: 99px; overflow: hidden; margin-top: 8px; }
+    .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; }
+    .err { color: var(--danger); font-size: 13px; min-height: 18px; }
+    .hidden { display: none; }
+    .switch { display: flex; align-items: center; gap: 8px; color: var(--text); }
+    footer { color: var(--muted); font-size: 12px; margin-top: 22px; }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row">
+      <div>
+        <h1>vtests</h1>
+        <div class="sub">VPS 稳定性 / 模拟负载 · v{{VERSION}}</div>
+      </div>
+      <div class="spacer"></div>
+      <span id="runPill" class="pill off">未加压</span>
+    </div>
+
+    <section id="login" class="card">
+      <label>面板密码</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <div class="err" id="loginErr"></div>
+      <div class="row" style="margin-top:12px">
+        <button id="loginBtn" type="button">登录</button>
+      </div>
+    </section>
+
+    <section id="app" class="hidden">
+      <div class="grid">
+        <div class="card">
+          <label>CPU</label>
+          <div class="metric" id="cpuNow">—%</div>
+          <div class="bar"><i id="cpuBar"></i></div>
+          <div class="sub" id="hostLine"></div>
+        </div>
+        <div class="card">
+          <label>内存</label>
+          <div class="metric" id="memNow">—</div>
+          <div class="bar"><i id="memBar"></i></div>
+          <div class="sub" id="memLine"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>CPU 目标负载 <span id="cpuLabel">20%</span></label>
+        <input id="cpu" type="range" min="0" max="100" step="1" />
+        <label style="margin-top:14px">内存占用 <span id="memLabel">128 MB</span></label>
+        <input id="mem" type="range" min="0" max="512" step="16" />
+        <div class="sub">小内存 VPS 会自动封顶，避免把系统吃光。</div>
+      </div>
+
+      <div class="card">
+        <label class="switch"><input id="sched" type="checkbox" /> 启用定时时间段</label>
+        <div class="grid" style="margin-top:12px">
+          <div>
+            <label>开始</label>
+            <input id="start" type="time" />
+          </div>
+          <div>
+            <label>结束</label>
+            <input id="end" type="time" />
+          </div>
+        </div>
+        <label style="margin-top:12px">时区</label>
+        <input id="tz" type="text" />
+        <div class="sub" id="windowLine"></div>
+      </div>
+
+      <div class="card row">
+        <button id="saveBtn" type="button">保存设置</button>
+        <button id="startBtn" type="button">立即开始</button>
+        <button id="stopBtn" class="danger" type="button">立即停止</button>
+        <div class="spacer"></div>
+        <button id="logoutBtn" class="ghost" type="button">退出</button>
+      </div>
+      <div class="err" id="appErr"></div>
+      <footer>底层加压使用 Ubuntu 自带的 stress-ng。默认安装后不会自动加压。</footer>
+    </section>
+  </div>
+  <script>
+    const PREFIX = "{{PREFIX}}";
+    const $ = (id) => document.getElementById(id);
+    const api = (path, opt) => fetch(PREFIX + path, Object.assign({ credentials: "same-origin" }, opt || {}));
+
+    async function login() {
+      $("loginErr").textContent = "";
+      const res = await api("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: $("password").value })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        $("loginErr").textContent = data.error || "登录失败";
+        return;
+      }
+      $("login").classList.add("hidden");
+      $("app").classList.remove("hidden");
+      await refresh();
+    }
+
+    function applyConfig(cfg, maxMem) {
+      $("cpu").value = cfg.cpu_percent;
+      $("cpuLabel").textContent = cfg.cpu_percent + "%";
+      $("mem").max = String(maxMem);
+      $("mem").value = Math.min(cfg.memory_mb, maxMem);
+      $("memLabel").textContent = $("mem").value + " MB";
+      $("sched").checked = cfg.schedule_enabled;
+      $("start").value = cfg.schedule_start;
+      $("end").value = cfg.schedule_end;
+      $("tz").value = cfg.timezone;
+    }
+
+    async function refresh() {
+      const res = await api("/api/status");
+      if (res.status === 401) {
+        $("login").classList.remove("hidden");
+        $("app").classList.add("hidden");
+        return;
+      }
+      const s = await res.json();
+      $("login").classList.add("hidden");
+      $("app").classList.remove("hidden");
+      $("cpuNow").textContent = s.cpu_percent.toFixed(1) + "%";
+      $("cpuBar").style.width = Math.min(100, s.cpu_percent) + "%";
+      $("memNow").textContent = s.mem.used_mb + " MB";
+      $("memBar").style.width = (s.mem.total_mb ? (s.mem.used_mb / s.mem.total_mb * 100) : 0) + "%";
+      $("memLine").textContent = "总计 " + s.mem.total_mb + " MB · 可用 " + s.mem.avail_mb + " MB · 上限 " + s.max_memory_mb + " MB";
+      $("hostLine").textContent = s.hostname + " · " + s.cores + " 核 · load " + s.loadavg.join(" / ");
+      $("runPill").textContent = s.running ? "加压中" : "未加压";
+      $("runPill").className = "pill " + (s.running ? "on" : "off");
+      $("windowLine").textContent = s.config.schedule_enabled
+        ? (s.in_window ? "当前处于运行时间段" : "当前不在运行时间段")
+        : "定时未启用，仅手动启停";
+      $("appErr").textContent = s.error || "";
+      if (document.activeElement && ["cpu", "mem", "start", "end", "tz"].includes(document.activeElement.id)) return;
+      applyConfig(s.config, s.max_memory_mb);
+    }
+
+    async function post(path, body) {
+      $("appErr").textContent = "";
+      const res = await api(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : "{}"
+      });
+      const data = await res.json();
+      if (!res.ok) $("appErr").textContent = data.error || "请求失败";
+      await refresh();
+    }
+
+    $("cpu").addEventListener("input", () => $("cpuLabel").textContent = $("cpu").value + "%");
+    $("mem").addEventListener("input", () => $("memLabel").textContent = $("mem").value + " MB");
+    $("loginBtn").addEventListener("click", login);
+    $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+    $("saveBtn").addEventListener("click", () => post("/api/config", {
+      cpu_percent: Number($("cpu").value),
+      memory_mb: Number($("mem").value),
+      schedule_enabled: $("sched").checked,
+      schedule_start: $("start").value,
+      schedule_end: $("end").value,
+      timezone: $("tz").value
+    }));
+    $("startBtn").addEventListener("click", () => post("/api/start"));
+    $("stopBtn").addEventListener("click", () => post("/api/stop"));
+    $("logoutBtn").addEventListener("click", () => post("/api/logout"));
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[Unit]
+Description=vtests VPS load simulator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vtests
+Environment=VTESTS_CONFIG=/etc/vtests/config.json
+ExecStart=/opt/vtests/venv/bin/python /opt/vtests/app/main.py
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
