@@ -2,6 +2,8 @@
 
 Ubuntu 24.04 上的 VPS 稳定性 / 模拟负载工具。一条命令安装，浏览器里设置 CPU 负载率和内存占用，并可按每天的时间段自动启停。
 
+**实现以 [docs/DESIGN.md](docs/DESIGN.md) 为准。** 当前仓库代码是探索性 spike，将按该文档重写。
+
 加压引擎使用发行版自带的 [stress-ng](https://github.com/ColinIanKing/stress-ng)。
 
 ## 一键安装
