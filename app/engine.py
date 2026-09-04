@@ -18,7 +18,7 @@ from app.metrics import meminfo
 log = logging.getLogger("vtests.engine")
 
 BANNED_FLAGS = ("--pathological", "--thrash", "--ignite-cpu", "--hdd", "--sock")
-ALLOWED_CPU_METHODS = frozenset({"nop"})
+ALLOWED_CPU_METHODS = frozenset({"nop", "loop"})
 CGROUP_OOM_ERROR = "cgroup OOM / MemoryMax"
 DEFAULT_LOG_DIR = Path("/var/log/vtests")
 DEFAULT_STATE_DIR = Path("/var/lib/vtests")
@@ -34,10 +34,13 @@ def oom_avoid_bytes(total_mb: int) -> str:
 
 
 def normalize_cpu_method(value: Any) -> str:
-    method = str(value or "nop").strip()
+    method = str(value or "loop").strip()
+    # noble stress-ng 0.17.06 has no nop; loop is the equivalent idle-burn method.
+    if method == "nop":
+        method = "loop"
     if method in ALLOWED_CPU_METHODS:
         return method
-    return "nop"
+    return "loop"
 
 
 def normalize_nice(value: Any) -> int:
@@ -89,7 +92,7 @@ def build_stress_cmd(
     mem: int,
     total_mb: int,
     *,
-    cpu_method: Any = "nop",
+    cpu_method: Any = "loop",
     nice: Any = 19,
     log_file: str | os.PathLike[str] | None = None,
     nice_bin: str | None = None,
@@ -186,7 +189,7 @@ class LoadEngine:
             cpu,
             mem,
             info["total_mb"],
-            cpu_method=cfg.get("cpu_method") or "nop",
+            cpu_method=cfg.get("cpu_method") or "loop",
             nice=cfg.get("nice", 19),
             log_file=log_path,
             nice_bin=shutil.which("nice"),

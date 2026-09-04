@@ -113,7 +113,7 @@ Spike **不能当成品**，主要问题见下文「Spike 审计」。本文是�
 - 安装后默认 `enabled=false`。
 - 随机 `base_path` + 面板密码。
 - `in_window()` 的跨午夜算法（`start == end` 视为全天；`start < end` 半开区间；否则跨夜）。
-- `--cpu-method nop`：低副作用地烧周期，避免 `all`/`matrixprod` 把 1 OCPU 打成热节流。
+- `--cpu-method loop`（noble `stress-ng` `0.17.06` 无 `nop`；`nop` 若出现则回退 `loop`）：低副作用地烧周期，避免 `all`/`matrixprod` 把 1 OCPU 打成热节流。
 - `--vm-keep`：保持映射，满足“占用”而不是分配后立刻释放。
 - `/etc/vtests/config.json` + `/etc/vtests/install-result.env`（mode 600）这对 3X-UI 同构文件。
 - `GET {base_path}/healthz` 给安装脚本做就绪探测。

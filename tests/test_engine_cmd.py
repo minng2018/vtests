@@ -34,7 +34,7 @@ def test_cpu_only_omits_vm():
     assert "--cpu-load" in cmd
     assert cmd[cmd.index("--cpu-load") + 1] == "10"
     assert "--cpu-method" in cmd
-    assert cmd[cmd.index("--cpu-method") + 1] == "nop"
+    assert cmd[cmd.index("--cpu-method") + 1] == "loop"
     assert "--vm" not in cmd
     assert "--vm-bytes" not in cmd
     assert "--vm-keep" not in cmd
@@ -73,16 +73,16 @@ def test_both_zero_does_not_build():
     assert _cmd(cpu=0, mem=0) is None
 
 
-def test_cpu_method_fallback_nop():
+def test_cpu_method_fallback_loop():
     cmd = _cmd(cpu=10, mem=0, cpu_method="all")
     assert cmd is not None
-    assert cmd[cmd.index("--cpu-method") + 1] == "nop"
+    assert cmd[cmd.index("--cpu-method") + 1] == "loop"
     cmd = _cmd(cpu=10, mem=0, cpu_method="matrixprod")
     assert cmd is not None
-    assert cmd[cmd.index("--cpu-method") + 1] == "nop"
+    assert cmd[cmd.index("--cpu-method") + 1] == "loop"
     cmd = _cmd(cpu=10, mem=0, cpu_method="nop")
     assert cmd is not None
-    assert cmd[cmd.index("--cpu-method") + 1] == "nop"
+    assert cmd[cmd.index("--cpu-method") + 1] == "loop"
 
 
 def test_oom_avoid_bytes_128m_on_1gb():
