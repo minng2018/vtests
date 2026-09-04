@@ -97,8 +97,6 @@ async def strip_prefix(request: Request, call_next):
     if path == base or path.startswith(base + "/"):
         request.scope["path"] = path[len(base) :] or "/"
         return await call_next(request)
-    if path == "/":
-        return JSONResponse({"service": "vtests", "version": _version()}, status_code=404)
     return JSONResponse({"error": "not found"}, status_code=404)
 
 

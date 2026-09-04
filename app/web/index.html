@@ -37,7 +37,7 @@
       margin-top: 16px;
     }
     label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    input[type=password], input[type=number], input[type=time], input[type=text] {
+    input[type=password], input[type=number], input[type=time], input[type=text], select {
       width: 100%;
       background: #0c1424;
       color: var(--text);
@@ -76,8 +76,8 @@
     .bar { height: 8px; background: #0c1424; border-radius: 99px; overflow: hidden; margin-top: 8px; }
     .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; }
     .err { color: var(--danger); font-size: 13px; min-height: 18px; }
+    .warn { color: var(--warn); font-size: 13px; min-height: 18px; margin-top: 10px; }
     .hidden { display: none; }
-    .switch { display: flex; align-items: center; gap: 8px; color: var(--text); }
     footer { color: var(--muted); font-size: 12px; margin-top: 22px; }
     @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
   </style>
@@ -119,15 +119,21 @@
       </div>
 
       <div class="card">
-        <label>CPU 目标负载 <span id="cpuLabel">20%</span></label>
-        <input id="cpu" type="range" min="0" max="100" step="1" />
-        <label style="margin-top:14px">内存占用 <span id="memLabel">128 MB</span></label>
-        <input id="mem" type="range" min="0" max="512" step="16" />
+        <label>CPU 目标负载 <span id="cpuLabel">10%</span></label>
+        <input id="cpu" type="range" min="0" max="30" step="1" />
+        <label style="margin-top:14px">内存占用 <span id="memLabel">64 MB</span></label>
+        <input id="mem" type="range" min="0" max="128" step="16" />
+        <div class="warn" id="capWarn"></div>
         <div class="sub">小内存 VPS 会自动封顶，避免把系统吃光。</div>
       </div>
 
       <div class="card">
-        <label class="switch"><input id="sched" type="checkbox" /> 启用定时时间段</label>
+        <label>运行模式</label>
+        <select id="mode">
+          <option value="off">关闭</option>
+          <option value="manual">手动</option>
+          <option value="schedule">定时</option>
+        </select>
         <div class="grid" style="margin-top:12px">
           <div>
             <label>开始</label>
@@ -176,16 +182,64 @@
       await refresh();
     }
 
-    function applyConfig(cfg, maxMem) {
-      $("cpu").value = cfg.cpu_percent;
-      $("cpuLabel").textContent = cfg.cpu_percent + "%";
-      $("mem").max = String(maxMem);
-      $("mem").value = Math.min(cfg.memory_mb, maxMem);
+    let lastCaps = { cpu: 30, mem: 128, total: 0 };
+    let lastSaved = { memory_mb: 64 };
+
+    function modeFromConfig(cfg) {
+      if (cfg.mode === "off" || cfg.mode === "manual" || cfg.mode === "schedule") return cfg.mode;
+      if (cfg.schedule_enabled) return "schedule";
+      if (cfg.enabled) return "manual";
+      return "off";
+    }
+
+    function updateCapWarn() {
+      const cpu = Number($("cpu").value);
+      const mem = Number($("mem").value);
+      const atCpu = lastCaps.cpu > 0 && cpu >= lastCaps.cpu;
+      const atMem = lastCaps.mem > 0 && mem >= lastCaps.mem;
+      const parts = [];
+      if (lastCaps.mem <= 0) parts.push("内存紧张，仅允许 CPU");
+      if (atCpu || atMem) {
+        if (lastCaps.total && lastCaps.total <= 1536) {
+          parts.push("已达上限，可能影响本机其它服务 / 触发 OOM / 云厂商突发策略");
+        } else {
+          parts.push("已达服务器上限，更高的值不会被保存");
+        }
+      }
+      $("capWarn").textContent = parts.join("。");
+    }
+
+    function windowText(s) {
+      const cfg = s.config;
+      const mode = modeFromConfig(cfg);
+      if (mode === "schedule" && cfg.paused_until_next_window) return "已暂停到下一时间段";
+      if (mode === "schedule") {
+        const win = s.in_window ? "当前处于运行时间段" : "当前不在运行时间段";
+        return cfg.schedule_start === cfg.schedule_end ? win + " · 开始等于结束表示全天" : win;
+      }
+      if (mode === "manual") return "手动模式，仅手动启停";
+      return "已关闭，不加压";
+    }
+
+    function applyConfig(cfg, maxMem, maxCpu, totalMb) {
+      lastCaps.cpu = Math.max(0, Number(maxCpu) || 0);
+      lastCaps.mem = Math.max(0, Number(maxMem) || 0);
+      lastCaps.total = Number(totalMb) || 0;
+      lastSaved.memory_mb = Number(cfg.memory_mb) || 0;
+      const cpuMax = lastCaps.cpu || 100;
+      $("cpu").max = String(cpuMax);
+      $("cpu").value = String(Math.min(Number(cfg.cpu_percent) || 0, cpuMax));
+      $("cpuLabel").textContent = $("cpu").value + "%";
+      $("mem").max = String(lastCaps.mem);
+      $("mem").step = lastCaps.mem >= 16 && lastCaps.mem % 16 === 0 ? "16" : "1";
+      $("mem").disabled = lastCaps.mem <= 0;
+      $("mem").value = String(Math.min(Number(cfg.memory_mb) || 0, lastCaps.mem));
       $("memLabel").textContent = $("mem").value + " MB";
-      $("sched").checked = cfg.schedule_enabled;
+      $("mode").value = modeFromConfig(cfg);
       $("start").value = cfg.schedule_start;
       $("end").value = cfg.schedule_end;
       $("tz").value = cfg.timezone;
+      updateCapWarn();
     }
 
     async function refresh() {
@@ -203,15 +257,13 @@
       $("memNow").textContent = s.mem.used_mb + " MB";
       $("memBar").style.width = (s.mem.total_mb ? (s.mem.used_mb / s.mem.total_mb * 100) : 0) + "%";
       $("memLine").textContent = "总计 " + s.mem.total_mb + " MB · 可用 " + s.mem.avail_mb + " MB · 上限 " + s.max_memory_mb + " MB";
-      $("hostLine").textContent = s.hostname + " · " + s.cores + " 核 · load " + s.loadavg.join(" / ");
+      $("hostLine").textContent = s.hostname + " · " + s.cores + " 核 · load " + s.loadavg.join(" / ") + " · CPU 上限 " + s.max_cpu_percent + "%";
       $("runPill").textContent = s.running ? "加压中" : "未加压";
       $("runPill").className = "pill " + (s.running ? "on" : "off");
-      $("windowLine").textContent = s.config.schedule_enabled
-        ? (s.in_window ? "当前处于运行时间段" : "当前不在运行时间段")
-        : "定时未启用，仅手动启停";
+      $("windowLine").textContent = windowText(s);
       $("appErr").textContent = s.error || "";
-      if (document.activeElement && ["cpu", "mem", "start", "end", "tz"].includes(document.activeElement.id)) return;
-      applyConfig(s.config, s.max_memory_mb);
+      if (document.activeElement && ["cpu", "mem", "start", "end", "tz", "mode"].includes(document.activeElement.id)) return;
+      applyConfig(s.config, s.max_memory_mb, s.max_cpu_percent, s.mem.total_mb);
     }
 
     async function post(path, body) {
@@ -226,18 +278,28 @@
       await refresh();
     }
 
-    $("cpu").addEventListener("input", () => $("cpuLabel").textContent = $("cpu").value + "%");
-    $("mem").addEventListener("input", () => $("memLabel").textContent = $("mem").value + " MB");
+    $("cpu").addEventListener("input", () => {
+      $("cpuLabel").textContent = $("cpu").value + "%";
+      updateCapWarn();
+    });
+    $("mem").addEventListener("input", () => {
+      $("memLabel").textContent = $("mem").value + " MB";
+      updateCapWarn();
+    });
     $("loginBtn").addEventListener("click", login);
     $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
-    $("saveBtn").addEventListener("click", () => post("/api/config", {
-      cpu_percent: Number($("cpu").value),
-      memory_mb: Number($("mem").value),
-      schedule_enabled: $("sched").checked,
-      schedule_start: $("start").value,
-      schedule_end: $("end").value,
-      timezone: $("tz").value
-    }));
+    $("saveBtn").addEventListener("click", () => {
+      const body = {
+        cpu_percent: Number($("cpu").value),
+        mode: $("mode").value,
+        schedule_start: $("start").value,
+        schedule_end: $("end").value,
+        timezone: $("tz").value
+      };
+      // Live MemAvailable cap of 0 must not persist over the saved request.
+      body.memory_mb = lastCaps.mem > 0 ? Number($("mem").value) : lastSaved.memory_mb;
+      post("/api/config", body);
+    });
     $("startBtn").addEventListener("click", () => post("/api/start"));
     $("stopBtn").addEventListener("click", () => post("/api/stop"));
     $("logoutBtn").addEventListener("click", () => post("/api/logout"));
