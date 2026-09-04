@@ -115,6 +115,23 @@ unset VTESTS_NGINX_ROOT
 tls_paths
 pass "server_name_taken matches typical vhosts and restores nullglob"
 
+empty=$(mktemp -d)
+export VTESTS_NGINX_ROOT="${empty}/nginx"
+export VTESTS_BACKUP_ROOT="${empty}/backups"
+mkdir -p "${VTESTS_NGINX_ROOT}/sites-enabled" "${VTESTS_NGINX_ROOT}/sites-available"
+backup_nginx || fail "backup empty nginx tree"
+[[ -n "${NGINX_BACKUP:-}" && "${NGINX_BACKUP}" == "${VTESTS_BACKUP_ROOT}/"* && -d "${NGINX_BACKUP}" ]] \
+    || fail "backup dest must be a dir under BACKUP_ROOT"
+other_vhosts_unchanged || fail "empty sites-enabled must not fail-close TLS"
+TLS_ERROR=""
+other_vhosts_unchanged
+[[ -z "${TLS_ERROR:-}" ]] || fail "empty sites-enabled must not set TLS_ERROR"
+rm -rf "${empty}"
+unset VTESTS_NGINX_ROOT VTESTS_BACKUP_ROOT
+NGINX_BACKUP=""
+tls_paths
+pass "empty sites-enabled other_vhosts_unchanged returns 0"
+
 # --- dry-run vhost render ---
 http_body=$(render_vhost http vt-frp.beeorbit.net 41234) || fail "render http"
 printf '%s\n' "${http_body}" | grep -q "managed-by: vtests" || fail "http header marker"

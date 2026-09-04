@@ -476,21 +476,6 @@ server_name_mentions() {
     grep -E "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${escaped}([[:space:]]|;|$)" "${real}" >/dev/null 2>&1
 }
 
-nullglob_begin() {
-    if shopt -q nullglob; then
-        printf '1'
-    else
-        shopt -s nullglob
-        printf '0'
-    fi
-}
-
-nullglob_end() {
-    if [[ "${1:-0}" == "0" ]]; then
-        shopt -u nullglob
-    fi
-}
-
 prompt_domain() {
     local raw=""
     if [[ "${VTESTS_NONINTERACTIVE:-}" == "1" || ! -t 0 ]]; then
@@ -607,18 +592,19 @@ http_ports_blocked() {
 }
 
 server_name_taken() {
-    local domain=$1 f base had_nullglob
+    local domain=$1 f base had_nullglob=0
     tls_paths
-    had_nullglob=$(nullglob_begin)
+    shopt -q nullglob && had_nullglob=1
+    shopt -s nullglob
     for f in "${NGINX_ROOT}/sites-enabled/"*; do
         base=$(basename "${f}")
         [[ "${base}" == "vtests.conf" ]] && continue
         if server_name_mentions "${f}" "${domain}"; then
-            nullglob_end "${had_nullglob}"
+            [[ "${had_nullglob}" == "1" ]] || shopt -u nullglob
             return 0
         fi
     done
-    nullglob_end "${had_nullglob}"
+    [[ "${had_nullglob}" == "1" ]] || shopt -u nullglob
     return 1
 }
 
@@ -799,13 +785,21 @@ write_vhost_with_ipv6_fallback() {
 }
 
 backup_nginx() {
-    local ts dest
+    local ts dest=""
     tls_paths
     ts=$(date +%Y%m%d%H%M%S)
-    mkdir -p "${BACKUP_ROOT}"
-    dest=$(mktemp -d "${BACKUP_ROOT}/vtests-nginx-${ts}-XXXXXX")
+    mkdir -p "${BACKUP_ROOT}" || return 1
+    dest=$(mktemp -d "${BACKUP_ROOT}/vtests-nginx-${ts}-XXXXXX") || dest=""
+    if [[ -z "${dest}" || "${dest}" != "${BACKUP_ROOT}/"* || ! -d "${dest}" ]]; then
+        TLS_ERROR="备份 nginx 失败：无法创建备份目录"
+        return 1
+    fi
     if [[ -d "${NGINX_ROOT}" ]]; then
-        cp -a "${NGINX_ROOT}/." "${dest}/"
+        if ! cp -a "${NGINX_ROOT}/." "${dest}/"; then
+            rm -rf "${dest}"
+            TLS_ERROR="备份 nginx 失败：无法复制"
+            return 1
+        fi
     fi
     NGINX_BACKUP="${dest}"
     TLS_DID_BACKUP=1
@@ -855,21 +849,22 @@ restore_nginx() {
 }
 
 other_vhosts_unchanged() {
-    local f base had_nullglob
+    local f base had_nullglob=0
     tls_paths
     [[ -n "${NGINX_BACKUP:-}" && -d "${NGINX_BACKUP}" ]] || return 0
     if [[ -d "${NGINX_BACKUP}/sites-enabled" && -d "${NGINX_ROOT}/sites-enabled" ]]; then
-        had_nullglob=$(nullglob_begin)
+        shopt -q nullglob && had_nullglob=1
+        shopt -s nullglob
         for f in "${NGINX_BACKUP}/sites-enabled/"*; do
             base=$(basename "${f}")
             [[ "${base}" == "vtests.conf" ]] && continue
             if ! diff -q "${f}" "${NGINX_ROOT}/sites-enabled/${base}" >/dev/null 2>&1; then
                 TLS_ERROR="sites-enabled 中非 vtests 文件被改动"
-                nullglob_end "${had_nullglob}"
+                [[ "${had_nullglob}" == "1" ]] || shopt -u nullglob
                 return 1
             fi
         done
-        nullglob_end "${had_nullglob}"
+        [[ "${had_nullglob}" == "1" ]] || shopt -u nullglob
     fi
     return 0
 }

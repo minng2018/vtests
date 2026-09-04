@@ -46,6 +46,9 @@ def test_install_sh_tls_contract():
     assert "protected_site_domain" in text
     assert "tls_uninstall_should_delete_cert" in text
     assert "server_name_mentions" in text
+    assert "nullglob_begin" not in text
+    assert "shopt -s nullglob" in text
+    assert '"${dest}" != "${BACKUP_ROOT}/"*' in text or "BACKUP_ROOT}/" in text
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
