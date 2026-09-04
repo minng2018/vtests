@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -68,3 +69,38 @@ def test_uvicorn_workers_1_ok(monkeypatch):
     monkeypatch.setenv("UVICORN_WORKERS", "1")
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     _assert_runtime()
+
+
+def test_requirements_lock_pins_runtime_and_pytest():
+    path = ROOT / "requirements.lock"
+    assert path.is_file()
+    pinned: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "==" not in line:
+            continue
+        name, ver = line.split("==", 1)
+        pinned[name.lower()] = ver
+    for pkg in ("fastapi", "uvicorn", "pytest", "httpx2"):
+        assert pkg in pinned, f"{pkg} missing from requirements.lock"
+        assert pinned[pkg], f"{pkg} has empty version"
+        assert ">=" not in pinned[pkg]
+        assert "*" not in pinned[pkg]
+
+
+def test_ci_workflow_runs_unit_and_tls_without_ssh_or_le():
+    path = ROOT / ".github/workflows/ci.yml"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "ubuntu-24.04" in text
+    assert "requirements.lock" in text
+    assert "pytest" in text
+    assert "test_tls_uninstall.sh" in text
+    assert "VTESTS_TLS_DRY_RUN" in text
+    assert 'VTESTS_DOMAIN: ""' in text
+    assert "158.101.29.241" not in text
+    assert "vt-frp.beeorbit.net" not in text
+    assert "letsencrypt.org" not in text
+    assert "acme-v02" not in text
+    assert "certbot certonly" not in text
+    assert not re.search(r"(?i)\b(ssh|scp|rsync)\b", text)

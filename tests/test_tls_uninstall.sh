@@ -27,6 +27,37 @@ protected_site_domain "beeman.beeorbit.net" || fail "beeman is protected"
 protected_site_domain "vt-frp.beeorbit.net" && fail "panel domain is not protected"
 pass "domain validation"
 
+# --- container/CI smoke: empty domain stays IP HTTP (no LE) ---
+(
+    export VTESTS_NONINTERACTIVE=1
+    unset VTESTS_DOMAIN || true
+    got=$(prompt_domain)
+    [[ -z "${got}" ]] || fail "noninteractive empty domain must be empty, got ${got}"
+)
+pass "empty domain noninteractive smoke"
+
+# --- DNS precheck (injected A records; no live Let's Encrypt) ---
+TLS_ERROR=""
+VTESTS_FAKE_A_RECORDS="158.101.29.241" dns_ok_for_tls "panel.example.test" \
+    || fail "A containing public IP must pass"
+TLS_ERROR=""
+VTESTS_FAKE_A_RECORDS="1.2.3.4 158.101.29.241 9.9.9.9" dns_ok_for_tls "panel.example.test" \
+    || fail "extra A records still pass if public IP present"
+TLS_ERROR=""
+VTESTS_FAKE_A_RECORDS="1.2.3.4" dns_ok_for_tls "panel.example.test" \
+    && fail "A without public IP must fail"
+[[ "${TLS_ERROR}" == "A 记录不含本机 IPv4" ]] || fail "mismatch A should set TLS_ERROR"
+TLS_ERROR=""
+VTESTS_FAKE_A_RECORDS=$'\n' dns_ok_for_tls "panel.example.test" \
+    && fail "empty A must fail"
+[[ "${TLS_ERROR}" == "域名未解析" ]] || fail "empty A should set 域名未解析"
+TLS_ERROR=""
+VTESTS_PUBLIC_IP="服务器IP" VTESTS_FAKE_A_RECORDS="158.101.29.241" dns_ok_for_tls "panel.example.test" \
+    && fail "missing public IP must fail"
+[[ "${TLS_ERROR}" == "无法获取本机公网 IPv4" ]] || fail "missing public IP should set TLS_ERROR"
+TLS_ERROR=""
+pass "DNS precheck"
+
 # --- cert delete whitelist ---
 vtests_cert_may_delete "vt-frp.beeorbit.net" "vt-frp.beeorbit.net" \
     || fail "panel-only lineage must be deletable"

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Never log into the trial host. Never issue production Let's Encrypt certificates.
+# TLS coverage is fixture-only (VTESTS_TLS_DRY_RUN=1). Smoke uses an empty domain.
+
+jobs:
+  test:
+    name: pytest and TLS fixtures
+    runs-on: ubuntu-24.04
+    env:
+      VTESTS_DOMAIN: ""
+      VTESTS_NONINTERACTIVE: "1"
+      VTESTS_TLS_DRY_RUN: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install pinned Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+
+      - name: Install nginx for fixture nginx -t
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx
+
+      - name: Run pytest
+        run: python -m pytest tests/ -q
+
+      - name: Run TLS rollback fixtures
+        run: bash tests/test_tls_uninstall.sh
