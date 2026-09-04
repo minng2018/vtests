@@ -38,6 +38,11 @@ def test_install_sh_contract():
     assert "vtests:vtests 600" in text
     assert 'cp -a "${src}/nginx"' in text or "nginx" in text
     assert "cp \"${src}/install.sh\"" in text or 'cp "${src}/install.sh"' in text
+    assert "certbot certonly --webroot" in text
+    assert "enable_tls" in text
+    assert "tls_fallback" in text
+    assert "VTESTS_DOMAIN" in text
+    assert "VTESTS_TLS_DRY_RUN" in text
 
 
 def test_vtests_sh_cli_contract():
@@ -48,6 +53,8 @@ def test_vtests_sh_cli_contract():
     assert "reset_password" in text
     assert 'password)' in text
     assert "do_uninstall" in text
+    assert "本机备用" in text
+    assert "proxy_pass" in text
 
 
 def test_uvicorn_workers_gt1_exits(monkeypatch):

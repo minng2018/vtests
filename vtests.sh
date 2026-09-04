@@ -31,7 +31,14 @@ show_info() {
     if [[ -f ${RESULT} ]]; then
         # shellcheck source=/dev/null
         . ${RESULT}
-        echo -e "地址: ${green}${URL}${plain}"
+        if [[ "${SSL_ENABLED:-0}" == "1" && -n "${DOMAIN:-}" ]]; then
+            echo -e "地址: ${green}https://${DOMAIN}${BASE_PATH}/${plain}"
+            echo -e "本机备用: ${green}${LOCAL_URL:-http://127.0.0.1:${PORT}${BASE_PATH}/}${plain}"
+            echo "HTTPS: 已启用"
+            echo "域名: ${DOMAIN}"
+        else
+            echo -e "地址: ${green}${URL}${plain}"
+        fi
         echo "端口: ${PORT}"
         echo "路径: ${BASE_PATH}/"
         echo "密码: ${PASSWORD}"
@@ -42,6 +49,45 @@ show_info() {
         echo -e "面板服务: ${green}运行中${plain}"
     else
         echo -e "面板服务: ${yellow}已停止${plain}"
+    fi
+}
+
+vhost_is_ours() {
+    local file=$1 domain=${2:-}
+    local real base
+    [[ -e "${file}" || -L "${file}" ]] || return 1
+    real=$(readlink -f "${file}" 2>/dev/null || printf '%s' "${file}")
+    [[ -f "${real}" ]] || return 1
+    if head -n 20 "${real}" | grep -q "managed-by: vtests"; then
+        return 0
+    fi
+    base=$(basename "${real}")
+    [[ "${base}" == "vtests.conf" ]] || return 1
+    [[ -n "${domain}" ]] || return 1
+    grep -E "^[[:space:]]*server_name[[:space:]]+${domain}[[:space:];]" "${real}" >/dev/null 2>&1
+}
+
+sync_vhost_proxy_pass() {
+    local port=$1
+    local domain=${2:-}
+    local available=/etc/nginx/sites-available/vtests.conf
+    [[ -f "${available}" ]] || return 0
+    vhost_is_ours "${available}" "${domain}" || return 0
+    python3 - "${available}" "${port}" <<'PY'
+import re, sys
+path, port = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+new = re.sub(
+    r"proxy_pass\s+http://127\.0\.0\.1:\d+",
+    "proxy_pass http://127.0.0.1:" + port,
+    text,
+)
+if new != text:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new)
+PY
+    if command -v nginx >/dev/null 2>&1; then
+        nginx -t && systemctl reload nginx
     fi
 }
 
@@ -87,11 +133,30 @@ def mutate(cfg):
 
 update_config(mutate)
 PY
+    local ssl_on=0 domain="" base=""
+    if [[ -f ${CONF} ]]; then
+        ssl_on=$(python3 -c 'import json,sys; print(1 if json.load(open(sys.argv[1])).get("ssl_enabled") else 0)' "${CONF}" 2>/dev/null || echo 0)
+        domain=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("domain") or "")' "${CONF}" 2>/dev/null || true)
+    fi
     if [[ -f ${RESULT} ]]; then
+        # shellcheck source=/dev/null
+        . ${RESULT}
+        base="${BASE_PATH:-}"
         sed -i "s/^PORT=.*/PORT=${port}/" ${RESULT}
-        sed -i "s#:[0-9][0-9]*#:${port}#" ${RESULT}
+        if [[ "${ssl_on}" == "1" ]]; then
+            if grep -q '^LOCAL_URL=' ${RESULT}; then
+                sed -i "s|^LOCAL_URL=.*|LOCAL_URL=http://127.0.0.1:${port}${base}/|" ${RESULT}
+            else
+                printf 'LOCAL_URL=http://127.0.0.1:%s%s/\n' "${port}" "${base}" >> ${RESULT}
+            fi
+        else
+            sed -i "s#:[0-9][0-9]*#:${port}#" ${RESULT}
+        fi
         chown root:root ${RESULT}
         chmod 600 ${RESULT}
+    fi
+    if [[ "${ssl_on}" == "1" ]]; then
+        sync_vhost_proxy_pass "${port}" "${domain}"
     fi
     systemctl restart vtests
     echo "已改为 ${port} 并重启面板服务"

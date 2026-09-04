@@ -1,0 +1,19 @@
+Saving debug log to /var/log/letsencrypt/letsencrypt.log
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Found the following certs:
+  Certificate Name: beeman.beeorbit.net
+    Serial Number: 3b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7
+    Key Type: ECDSA
+    Domains: beeman.beeorbit.net beenovel.beeorbit.net
+    Expiry Date: 2026-11-15 08:12:00+00:00 (VALID: 72 days)
+    Certificate Path: /etc/letsencrypt/live/beeman.beeorbit.net/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/beeman.beeorbit.net/privkey.pem
+  Certificate Name: vt-frp.beeorbit.net
+    Serial Number: aaaabbbbccccddddeeeeffff
+    Key Type: ECDSA
+    Domains: vt-frp.beeorbit.net
+    Expiry Date: 2027-01-01 00:00:00+00:00 (VALID: 120 days)
+    Certificate Path: /etc/letsencrypt/live/vt-frp.beeorbit.net/fullchain.pem
+    Private Key Path: /etc/letsencrypt/live/vt-frp.beeorbit.net/privkey.pem
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -

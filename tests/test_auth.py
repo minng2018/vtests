@@ -214,6 +214,17 @@ def test_public_bind_key_is_peer_not_xff():
     assert auth.client_rate_key(req_real, ssl) == "203.0.113.5"
 
 
+def test_ssl_cookie_secure_flag_follows_config():
+    _cfg(ssl_enabled=False, password="s3cret")
+    with _client() as client:
+        resp = client.post("/api/login", json={"password": "s3cret"})
+    assert "secure" not in resp.headers.get("set-cookie", "").lower()
+    _cfg(ssl_enabled=True, password="s3cret")
+    with _client() as client:
+        resp = client.post("/api/login", json={"password": "s3cret"})
+    assert "secure" in resp.headers.get("set-cookie", "").lower()
+
+
 def test_reset_password_rotates_secret():
     _cfg(password="old", secret="oldsecretoldsecret")
     token = auth.make_token("oldsecretoldsecret")

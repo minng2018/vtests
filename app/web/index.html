@@ -109,6 +109,7 @@
           <div class="metric" id="cpuNow">—%</div>
           <div class="bar"><i id="cpuBar"></i></div>
           <div class="sub" id="hostLine"></div>
+          <div class="sub" id="tlsLine"></div>
         </div>
         <div class="card">
           <label>内存</label>
@@ -258,6 +259,11 @@
       $("memBar").style.width = (s.mem.total_mb ? (s.mem.used_mb / s.mem.total_mb * 100) : 0) + "%";
       $("memLine").textContent = "总计 " + s.mem.total_mb + " MB · 可用 " + s.mem.avail_mb + " MB · 上限 " + s.max_memory_mb + " MB";
       $("hostLine").textContent = s.hostname + " · " + s.cores + " 核 · load " + s.loadavg.join(" / ") + " · CPU 上限 " + s.max_cpu_percent + "%";
+      if (s.config && s.config.domain) {
+        $("tlsLine").textContent = "域名 " + s.config.domain + (s.config.ssl_enabled ? " · HTTPS 已启用（只读）" : " · HTTP");
+      } else {
+        $("tlsLine").textContent = "未绑定域名 · IP:端口 HTTP";
+      }
       $("runPill").textContent = s.running ? "加压中" : "未加压";
       $("runPill").className = "pill " + (s.running ? "on" : "off");
       $("windowLine").textContent = windowText(s);

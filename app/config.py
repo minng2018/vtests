@@ -196,6 +196,10 @@ def default_config(*, check_bind: bool = False) -> dict[str, Any]:
         "timezone": "Asia/Shanghai",
         "enabled": False,
         "paused": False,
+        "domain": "",
+        "ssl_enabled": False,
+        "cert_path": "",
+        "key_path": "",
     }
     return cfg
 
@@ -264,6 +268,9 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "port": coerce_listen_port(cfg.get("port")),
         "mode": cfg.get("mode") if cfg.get("mode") in VALID_MODES else "off",
         "paused_until_next_window": bool(cfg.get("paused_until_next_window")),
+        "listen": str(cfg.get("listen") or "0.0.0.0"),
+        "domain": str(cfg.get("domain") or ""),
+        "ssl_enabled": bool(cfg.get("ssl_enabled")),
     }
 
 
