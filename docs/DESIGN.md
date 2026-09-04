@@ -10,7 +10,7 @@
 | 原型目标 OS | Ubuntu 24.04 (noble) |
 | 当前代码状态 | exploratory spike（`0.1.0`，commit `07dfcca`），**不是**冻结规格 |
 | 本文地位 | 实现与评审的 source of truth；后续代码按本文重写，而不是把 spike 当成成品 |
-| 修订 | 2026-09-02：v1 增加安装时可选域名 + HTTPS（`vt-frp.beeorbit.net`）。评审后改为 `certbot certonly --webroot` 自写 443 模板、CPU 服务端封顶、所有权契约、调度状态机冻结、PR 保持 `main` 可安装。 |
+| 修订 | 2026-09-02：v1 增加安装时可选域名 + HTTPS（`vt-frp.beeorbit.net`）。评审后改为 `certbot certonly --webroot` 自写 443 模板、CPU 服务端封顶、所有权契约、调度状态机冻结、PR 保持 `main` 可安装。试验机 smoke：**仅短测**，CPU **30%**（1 GB 硬顶）、内存 ≤64 MB、≤5 分钟。 |
 
 ---
 
@@ -889,7 +889,7 @@ v1 策略：
 
 - 安装脚本 smoke（venv、systemd、healthz、登录、改配置）。
 - `VTESTS_DOMAIN=vt-frp.beeorbit.net` 的 HTTPS 安装路径：独立 Nginx vhost + 独立 Let's Encrypt 证书 + 打印 `https://vt-frp.beeorbit.net/<base_path>/`。
-- CPU ≤ 10%、内存 ≤ 64 MB、时长 ≤ 5 分钟的功能验证。
+- CPU **30%**（1 GB 档硬顶）、内存 ≤ 64 MB、时长 ≤ 5 分钟的功能验证。禁止再往上加。
 - 时间窗逻辑用“当前时刻 ±2 分钟”的短窗口验证，不要挂过夜满载。
 
 禁止（除非用户在 Open Questions 里明确改口）：
@@ -1134,7 +1134,7 @@ IP 模式示例：`URL=http://158.101.29.241:45123/xK92abQ1/`，`SSL_ENABLED=0`�
 | 安装 TLS 时改坏 beeman/beenovel Nginx 或删掉其 Let's Encrypt 证书 | 高 | **禁止 `--nginx` 插件**；`certonly --webroot`；自写 vhost；调用前备份整个 `/etc/nginx`；失败整树还原；HTTPS 探测 beeman+beenovel 非 200 则还原；独立 `--cert-name`；卸载白名单 |
 | certbot 签发失败导致整个安装中止，主机留下半套坏 vhost | 中 | `setup_tls` 只 `return 1`；`setup_tls \|\| tls_fallback`；apt 仅在缺二进制时 `--no-upgrade` |
 | `install-result.env` 被其它用户读到密码 | 中 | `0600` root |
-| 在生产 FRP 入口满载，打挂漫画/小说站点 | 高 | 默认不加压；1 GB 默认 10%/64MB；文档点名 `158.101.29.241` |
+| 在生产 FRP 入口满载，打挂漫画/小说站点 | 高 | 默认不加压；1 GB 默认 10%/64MB；试验机 smoke 允许 **30%/64MB/≤5 min**，禁止 ≥50% 与过夜 |
 | 自动改 iptables 打开新洞 | 中 | 默认不动防火墙 |
 | 日志里出现密码 | 低 | 不打密码；stress-ng `--quiet` |
 
@@ -1249,9 +1249,11 @@ GitHub Actions（后续 PR）：
 
 ### Q1. `158.101.29.241`（`oracle-1c1g-frp`）能否作为长期试验机？
 
+**已拍板（2026-09-02）：A. 仅 smoke；CPU 负载测试 30%。** 验证一键安装 + `vt-frp.beeorbit.net` HTTPS；CPU **30%**、内存 ≤64 MB、时长 ≤5 分钟。不做满载、不做跨夜窗口。满载另找机器。安装后的面板默认值仍是 10%/64 MB 且 `mode=off`，smoke 时在设置页把 CPU 拉到 30% 再点开始。
+
 | 选项 | 含义 | 代价 |
 | --- | --- | --- |
-| A. 仅 smoke（建议） | 安装 + 10%/64MB 短测 | 不能验证过夜窗口、高负载稳定性 |
+| A. 仅 smoke（**已选**，CPU **30%**） | 安装 + HTTPS + 30%/64MB 短测（≤5 min） | 不能验证过夜窗口、高负载稳定性 |
 | B. 低负载长期挂着（例如 10%/64MB + 日间窗口） | 顺便抬一点 CPU，可能降低 Always Free 闲置风险 | 与 FRP/Nginx 抢 1 GB；站点尾延迟上升 |
 | C. 换机 | 例如空闲的 `oracle-1c1g-3xui`（已有 x-ui，同样 1 GB，也不是干净实验室）或另开临时 VM | 最安全，但要有机器 |
 | D. 满载验收 | 明确接受 beeman/beenovel 中断 | **不建议** |
