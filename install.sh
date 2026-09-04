@@ -203,22 +203,32 @@ install_pkgs() {
     fi
 }
 
-fetch_app() {
-    local tmp tarball
-    tmp=$(mktemp -d)
-    tarball="${tmp}/vtests.tar.gz"
-    ok "正在从 GitHub 下载 ${REPO}@${BRANCH} ..."
-    if ! download "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" "${tarball}"; then
-        err "下载失败，请检查本机是否能访问 GitHub"
-        exit 1
+# Prefer the web releases/latest redirect (not subject to the unauthenticated
+# API's 60 req/h-per-IP limit), then fall back to the API. Prints nothing if
+# no GitHub Release exists yet so callers can use the VTESTS_BRANCH tarball.
+resolve_latest_tag() {
+    local url tag
+    url=$(curl -sSLI -o /dev/null -w '%{url_effective}' --retry 2 --connect-timeout 15 --max-time 30 \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)
+    tag=${url##*/tag/}
+    if [[ "${tag}" != "${url}" && -n "${tag}" && "${tag}" != "latest" ]]; then
+        printf '%s\n' "${tag}"
+        return 0
     fi
-    tar -xzf "${tarball}" -C "${tmp}"
-    local src
-    src=$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1)
-    if [[ -z "${src}" || ! -f "${src}/app/main.py" ]]; then
-        err "下载的源码不完整"
-        exit 1
+    tag=$(curl -Ls --retry 2 --connect-timeout 15 --max-time 30 \
+        "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | grep '"tag_name":' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+    if [[ -n "${tag}" ]]; then
+        printf '%s\n' "${tag}"
     fi
+}
+
+is_release_tag() {
+    [[ "${1:-}" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]
+}
+
+install_tree_from_src() {
+    local src=$1
     mkdir -p "${INSTALL_DIR}"
     rm -rf "${INSTALL_DIR}/app" "${INSTALL_DIR}/systemd" "${INSTALL_DIR}/nginx" \
         "${INSTALL_DIR}/requirements.txt" "${INSTALL_DIR}/VERSION" \
@@ -235,7 +245,79 @@ fetch_app() {
     cp "${src}/vtests.sh" "${INSTALL_DIR}/"
     cp "${src}/install.sh" "${INSTALL_DIR}/"
     chmod +x "${INSTALL_DIR}/vtests.sh" "${INSTALL_DIR}/install.sh"
+}
+
+src_from_tarball() {
+    local tmp=$1 tarball=$2 src
+    tar -xzf "${tarball}" -C "${tmp}"
+    src=$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [[ -z "${src}" || ! -f "${src}/app/main.py" ]]; then
+        err "下载的源码不完整"
+        exit 1
+    fi
+    printf '%s\n' "${src}"
+}
+
+# Download vtests-${tag}.tar.gz + SHA256SUMS from a GitHub Release.
+# Missing assets return 1 (caller may fall back to the branch tarball).
+# A tarball without a matching checksum is fatal — do not install unverified.
+fetch_release() {
+    local tag=$1 tmp tarball src
+    tmp=$(mktemp -d)
+    tarball="${tmp}/vtests-${tag}.tar.gz"
+    ok "正在从 GitHub Release 下载 ${REPO}@${tag} ..."
+    if ! download "https://github.com/${REPO}/releases/download/${tag}/vtests-${tag}.tar.gz" "${tarball}"; then
+        rm -rf "${tmp}"
+        return 1
+    fi
+    if ! download "https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS" "${tmp}/SHA256SUMS"; then
+        err "缺少 SHA256SUMS，拒绝安装未校验的 Release"
+        rm -rf "${tmp}"
+        exit 1
+    fi
+    if ! (cd "${tmp}" && sha256sum -c SHA256SUMS); then
+        err "SHA256 校验失败"
+        rm -rf "${tmp}"
+        exit 1
+    fi
+    src=$(src_from_tarball "${tmp}" "${tarball}")
+    install_tree_from_src "${src}"
     rm -rf "${tmp}"
+    return 0
+}
+
+fetch_branch() {
+    local tmp tarball src
+    tmp=$(mktemp -d)
+    tarball="${tmp}/vtests.tar.gz"
+    ok "正在从 GitHub 下载 ${REPO}@${BRANCH} ..."
+    if ! download "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz" "${tarball}"; then
+        err "下载失败，请检查本机是否能访问 GitHub"
+        rm -rf "${tmp}"
+        exit 1
+    fi
+    src=$(src_from_tarball "${tmp}" "${tarball}")
+    install_tree_from_src "${src}"
+    rm -rf "${tmp}"
+}
+
+fetch_app() {
+    local pin="${1:-}" tag
+    if is_release_tag "${pin}"; then
+        if ! fetch_release "${pin}"; then
+            err "下载 Release ${pin} 失败"
+            exit 1
+        fi
+        return
+    fi
+    tag=$(resolve_latest_tag || true)
+    if is_release_tag "${tag}"; then
+        if fetch_release "${tag}"; then
+            return
+        fi
+        warn "Release ${tag} 的源码包不可用，回退到 ${BRANCH} 分支"
+    fi
+    fetch_branch
 }
 
 setup_venv() {
@@ -1337,7 +1419,7 @@ main() {
     need_root
     detect_os
     install_pkgs
-    fetch_app
+    fetch_app "${1:-}"
     setup_venv
     ensure_user
     local info port path password

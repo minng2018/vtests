@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+# Never log into the trial host. Never issue production Let's Encrypt certificates.
+# Tag v* publishes a source tarball and SHA256SUMS only.
+
+jobs:
+  release:
+    name: Source tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build source tarball and SHA256SUMS
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VER="$(tr -d '[:space:]' < VERSION)"
+          if [[ "${TAG}" != "v${VER}" ]]; then
+            echo "VERSION (${VER}) does not match tag (${TAG})" >&2
+            exit 1
+          fi
+          TARBALL="vtests-${TAG}.tar.gz"
+          git archive --format=tar.gz --prefix="vtests-${TAG}/" -o "${TARBALL}" HEAD
+          sha256sum "${TARBALL}" > SHA256SUMS
+          ls -l "${TARBALL}" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TARBALL="vtests-${TAG}.tar.gz"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${TARBALL}" SHA256SUMS --clobber
+          else
+            gh release create "${TAG}" "${TARBALL}" SHA256SUMS \
+              --title "${TAG}" \
+              --generate-notes
+          fi

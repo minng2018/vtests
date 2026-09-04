@@ -14,6 +14,14 @@ Ubuntu 24.04 上的 VPS 稳定性 / 模拟负载工具。一条命令安装，�
 bash <(curl -Ls https://raw.githubusercontent.com/minng2018/vtests/main/install.sh)
 ```
 
+安装脚本默认拉最新 GitHub Release（`vtests-<tag>.tar.gz`，并用 `SHA256SUMS` 校验）。尚未发布 Release 时回退到 `main` 源码包。钉版本把 tag 当作参数：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/minng2018/vtests/main/install.sh) v0.2.0
+```
+
+打 tag `v0.2.0` 会触发 Actions，上传源码包并发布 GitHub Release。
+
 交互安装会询问已解析到本机公网 IPv4 的域名。直接回车则走 IP:端口 HTTP，不申请证书。非交互 HTTPS 示例：
 
 ```bash

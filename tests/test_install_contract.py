@@ -44,6 +44,14 @@ def test_install_sh_contract():
     assert "tls_fallback" in text
     assert "VTESTS_DOMAIN" in text
     assert "VTESTS_TLS_DRY_RUN" in text
+    assert "resolve_latest_tag" in text
+    assert "releases/latest" in text
+    assert "tag_name" in text
+    assert "vtests-${tag}.tar.gz" in text
+    assert "SHA256SUMS" in text
+    assert "sha256sum" in text
+    assert "archive/refs/heads/${BRANCH}.tar.gz" in text
+    assert 'fetch_app "${1:-}"' in text
 
 
 def test_vtests_sh_cli_contract():
@@ -104,3 +112,25 @@ def test_ci_workflow_runs_unit_and_tls_without_ssh_or_le():
     assert "acme-v02" not in text
     assert "certbot certonly" not in text
     assert not re.search(r"(?i)\b(ssh|scp|rsync)\b", text)
+
+
+def test_release_workflow_source_tarball_no_ssh_or_le():
+    path = ROOT / ".github/workflows/release.yml"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert '"v*"' in text
+    assert "git archive" in text
+    assert "SHA256SUMS" in text
+    assert "vtests-${TAG}.tar.gz" in text
+    assert "ubuntu-24.04" in text
+    assert "158.101.29.241" not in text
+    assert "vt-frp.beeorbit.net" not in text
+    assert "letsencrypt.org" not in text
+    assert "acme-v02" not in text
+    assert "certbot certonly" not in text
+    assert not re.search(r"(?i)\b(ssh|scp|rsync)\b", text)
+
+
+def test_version_is_020():
+    ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert ver == "0.2.0"
