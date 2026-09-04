@@ -32,6 +32,7 @@ tls_paths
 NGINX_BACKUP=""
 TLS_ERROR=""
 TLS_DID_BACKUP=0
+TLS_DID_CERTBOT=0
 TLS_DOMAIN=""
 
 ok() { echo -e "${green}$*${plain}"; }
@@ -438,6 +439,13 @@ normalize_domain() {
     printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+protected_site_domain() {
+    case "${1:-}" in
+        beeman.beeorbit.net|beenovel.beeorbit.net) return 0 ;;
+    esac
+    return 1
+}
+
 valid_domain() {
     local d=$1
     [[ -n "${d}" ]] || return 1
@@ -446,7 +454,41 @@ valid_domain() {
     [[ "${d}" != *:* ]] || return 1
     [[ "${d}" != localhost ]] || return 1
     [[ ! "${d}" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || return 1
+    if protected_site_domain "${d}"; then
+        return 1
+    fi
     [[ "${d}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]
+}
+
+domain_re_escape() {
+    printf '%s' "${1:-}" | sed 's/[.[*^$()+?{|]/\\&/g'
+}
+
+server_name_mentions() {
+    local file=$1 domain=$2 escaped
+    local real=$file
+    [[ -e "${file}" || -L "${file}" ]] || return 1
+    if [[ -L "${file}" ]]; then
+        real=$(readlink -f "${file}" 2>/dev/null || printf '%s' "${file}")
+    fi
+    [[ -f "${real}" ]] || return 1
+    escaped=$(domain_re_escape "${domain}")
+    grep -E "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${escaped}([[:space:]]|;|$)" "${real}" >/dev/null 2>&1
+}
+
+nullglob_begin() {
+    if shopt -q nullglob; then
+        printf '1'
+    else
+        shopt -s nullglob
+        printf '0'
+    fi
+}
+
+nullglob_end() {
+    if [[ "${1:-0}" == "0" ]]; then
+        shopt -u nullglob
+    fi
 }
 
 prompt_domain() {
@@ -565,16 +607,18 @@ http_ports_blocked() {
 }
 
 server_name_taken() {
-    local domain=$1 f base
+    local domain=$1 f base had_nullglob
     tls_paths
-    shopt -s nullglob
+    had_nullglob=$(nullglob_begin)
     for f in "${NGINX_ROOT}/sites-enabled/"*; do
         base=$(basename "${f}")
         [[ "${base}" == "vtests.conf" ]] && continue
-        if grep -E "^[[:space:]]*server_name[[:space:]].*(^|[[:space:]])${domain}([[:space:]]|;|$)" "${f}" >/dev/null 2>&1; then
+        if server_name_mentions "${f}" "${domain}"; then
+            nullglob_end "${had_nullglob}"
             return 0
         fi
     done
+    nullglob_end "${had_nullglob}"
     return 1
 }
 
@@ -593,7 +637,7 @@ vhost_is_ours() {
     fi
     [[ "${base}" == "vtests.conf" ]] || return 1
     [[ -n "${domain}" ]] || return 1
-    grep -E "^[[:space:]]*server_name[[:space:]]+${domain}[[:space:];]" "${real}" >/dev/null 2>&1
+    server_name_mentions "${real}" "${domain}"
 }
 
 ssl_options_text() {
@@ -668,12 +712,41 @@ write_vhost_file() {
     ln -sfn "${available}" "${enabled}"
 }
 
+write_fixture_nginx_conf() {
+    local dir wrap
+    tls_paths
+    dir="${VTESTS_BACKUP_ROOT:-/tmp}/vtests-nginx-t"
+    mkdir -p "${dir}" "${NGINX_ROOT}/sites-enabled"
+    wrap="${dir}/nginx.conf"
+    cat > "${wrap}" <<EOF
+worker_processes 1;
+error_log ${dir}/error.log;
+pid ${dir}/nginx.pid;
+events { worker_connections 4; }
+http {
+    access_log off;
+    include ${NGINX_ROOT}/sites-enabled/*;
+}
+EOF
+    printf '%s\n' "${wrap}"
+}
+
 nginx_test() {
-    if [[ -n "${VTESTS_NGINX_TEST_CONF:-}" ]] && command -v nginx >/dev/null 2>&1; then
+    local wrap
+    tls_paths
+    if ! command -v nginx >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ -n "${VTESTS_NGINX_TEST_CONF:-}" ]]; then
         nginx -t -c "${VTESTS_NGINX_TEST_CONF}" >/dev/null 2>&1
         return
     fi
-    if command -v nginx >/dev/null 2>&1 && [[ "${NGINX_ROOT}" == "/etc/nginx" ]] && ! tls_dry_run; then
+    if tls_dry_run && [[ -n "${VTESTS_NGINX_ROOT:-}" ]]; then
+        wrap=$(write_fixture_nginx_conf) || return 1
+        nginx -t -c "${wrap}" >/dev/null 2>&1
+        return
+    fi
+    if [[ "${NGINX_ROOT}" == "/etc/nginx" ]] && ! tls_dry_run; then
         nginx -t >/dev/null 2>&1
         return
     fi
@@ -729,12 +802,10 @@ backup_nginx() {
     local ts dest
     tls_paths
     ts=$(date +%Y%m%d%H%M%S)
-    dest="${BACKUP_ROOT}/vtests-nginx-${ts}"
     mkdir -p "${BACKUP_ROOT}"
+    dest=$(mktemp -d "${BACKUP_ROOT}/vtests-nginx-${ts}-XXXXXX")
     if [[ -d "${NGINX_ROOT}" ]]; then
-        cp -a "${NGINX_ROOT}" "${dest}"
-    else
-        mkdir -p "${dest}"
+        cp -a "${NGINX_ROOT}/." "${dest}/"
     fi
     NGINX_BACKUP="${dest}"
     TLS_DID_BACKUP=1
@@ -745,13 +816,34 @@ backup_nginx() {
 }
 
 restore_nginx() {
+    local sibling old
     tls_paths
     if [[ -z "${NGINX_BACKUP:-}" || ! -d "${NGINX_BACKUP}" ]]; then
         return 0
     fi
     mkdir -p "$(dirname "${NGINX_ROOT}")"
-    rm -rf "${NGINX_ROOT}"
-    cp -a "${NGINX_BACKUP}" "${NGINX_ROOT}"
+    sibling="${NGINX_ROOT}.restoring.$$"
+    old="${NGINX_ROOT}.old.$$"
+    rm -rf "${sibling}" "${old}"
+    if ! cp -a "${NGINX_BACKUP}" "${sibling}"; then
+        err "还原 nginx 失败：无法复制备份"
+        rm -rf "${sibling}"
+        return 1
+    fi
+    if [[ -e "${NGINX_ROOT}" ]] && ! mv "${NGINX_ROOT}" "${old}"; then
+        err "还原 nginx 失败：无法移开当前树"
+        rm -rf "${sibling}"
+        return 1
+    fi
+    if ! mv "${sibling}" "${NGINX_ROOT}"; then
+        err "还原 nginx 失败：无法就位备份"
+        if [[ -e "${old}" ]]; then
+            mv "${old}" "${NGINX_ROOT}" || true
+        fi
+        rm -rf "${sibling}"
+        return 1
+    fi
+    rm -rf "${old}"
     if command -v nginx >/dev/null 2>&1 && [[ "${NGINX_ROOT}" == "/etc/nginx" ]] && ! tls_dry_run; then
         if nginx -t >/dev/null 2>&1; then
             nginx_reload || true
@@ -763,19 +855,21 @@ restore_nginx() {
 }
 
 other_vhosts_unchanged() {
-    local f base
+    local f base had_nullglob
     tls_paths
     [[ -n "${NGINX_BACKUP:-}" && -d "${NGINX_BACKUP}" ]] || return 0
     if [[ -d "${NGINX_BACKUP}/sites-enabled" && -d "${NGINX_ROOT}/sites-enabled" ]]; then
-        shopt -s nullglob
+        had_nullglob=$(nullglob_begin)
         for f in "${NGINX_BACKUP}/sites-enabled/"*; do
             base=$(basename "${f}")
             [[ "${base}" == "vtests.conf" ]] && continue
             if ! diff -q "${f}" "${NGINX_ROOT}/sites-enabled/${base}" >/dev/null 2>&1; then
                 TLS_ERROR="sites-enabled 中非 vtests 文件被改动"
+                nullglob_end "${had_nullglob}"
                 return 1
             fi
         done
+        nullglob_end "${had_nullglob}"
     fi
     return 0
 }
@@ -908,11 +1002,14 @@ remove_owned_vhost() {
 sync_vhost_proxy_pass() {
     local port=$1
     local domain=${2:-}
-    local available body
+    local available enabled body bak
     available=$(vhost_available)
+    enabled=$(vhost_enabled)
     [[ -f "${available}" ]] || return 0
     domain="${domain:-$(cfg_get domain)}"
     vhost_is_ours "${available}" "${domain}" || return 0
+    bak=$(mktemp)
+    cp -a "${available}" "${bak}"
     body=$(python3 - "${available}" "${port}" <<'PY'
 import re, sys
 path, port = sys.argv[1], sys.argv[2]
@@ -926,7 +1023,15 @@ sys.stdout.write(text)
 PY
 )
     write_vhost_file "${body}"
-    nginx_test_reload || true
+    if nginx_test_reload; then
+        rm -f "${bak}"
+        return 0
+    fi
+    cp -a "${bak}" "${available}"
+    rm -f "${bak}"
+    ln -sfn "${available}" "${enabled}"
+    TLS_ERROR="${TLS_ERROR:-nginx -t 失败，已还原 vhost}"
+    return 1
 }
 
 ensure_nginx_certbot() {
@@ -1044,10 +1149,16 @@ setup_tls() {
     local port path
     TLS_ERROR=""
     TLS_DID_BACKUP=0
+    TLS_DID_CERTBOT=0
     NGINX_BACKUP=""
     TLS_DOMAIN="${domain}"
     tls_paths
     [[ -n "${domain}" ]] || return 1
+    if protected_site_domain "${domain}"; then
+        warn "拒绝把生产站点域名用作面板域名"
+        TLS_ERROR="禁止使用 ${domain}"
+        return 1
+    fi
     port=$(cfg_get port)
     path=$(cfg_get base_path)
     if [[ -z "${port}" ]]; then
@@ -1082,6 +1193,7 @@ setup_tls() {
         TLS_ERROR="VTESTS_TLS_DRY_RUN=1，已写 HTTP vhost，未调用 Let's Encrypt"
         return 1
     fi
+    TLS_DID_CERTBOT=1
     run_certbot_webroot "${domain}" || return 1
     write_vhost_with_ipv6_fallback ssl "${domain}" "${port}" || return 1
     other_vhosts_unchanged || return 1
@@ -1108,8 +1220,12 @@ tls_fallback() {
     if [[ -n "${TLS_ERROR:-}" ]]; then
         echo "原因: ${TLS_ERROR}"
     fi
-    restore_nginx || true
-    maybe_delete_panel_cert "${TLS_DOMAIN:-}" || true
+    if ! restore_nginx; then
+        err "还原 nginx 失败"
+    fi
+    if [[ "${TLS_DID_CERTBOT:-0}" == "1" ]]; then
+        maybe_delete_panel_cert "${TLS_DOMAIN:-}" || true
+    fi
     if ! tls_dry_run; then
         apply_tls_config "" "0.0.0.0" false || true
         port=$(cfg_get port)
@@ -1129,11 +1245,17 @@ enable_tls() {
     setup_tls "${domain}" || tls_fallback
 }
 
+tls_uninstall_should_delete_cert() {
+    local ssl=${1:-} domain=${2:-}
+    [[ "${ssl}" == "true" && -n "${domain}" ]]
+}
+
 uninstall() {
-    local domain=""
+    local domain="" ssl_now=""
     need_root
     if [[ -f "${CONF_DIR}/config.json" ]]; then
         domain=$(cfg_get domain || true)
+        ssl_now=$(cfg_get ssl_enabled || true)
     fi
     systemctl stop vtests 2>/dev/null || true
     systemctl disable vtests 2>/dev/null || true
@@ -1141,7 +1263,7 @@ uninstall() {
     rm -rf "${DROPIN_DIR}"
     systemctl daemon-reload || true
     remove_owned_vhost "${domain}" || true
-    if [[ -n "${domain}" ]]; then
+    if tls_uninstall_should_delete_cert "${ssl_now}" "${domain}"; then
         maybe_delete_panel_cert "${domain}"
     fi
     rm -rf "${INSTALL_DIR}" "${CONF_DIR}" "${STATE_DIR}" "${LOG_DIR}"
@@ -1198,7 +1320,9 @@ maybe_enable_tls() {
     local domain ssl_now
     ssl_now=$(cfg_get ssl_enabled)
     if [[ "${ssl_now}" == "true" ]]; then
-        sync_vhost_proxy_pass "${port}" "$(cfg_get domain)"
+        if ! sync_vhost_proxy_pass "${port}" "$(cfg_get domain)"; then
+            warn "proxy_pass 同步失败，已还原 vhost"
+        fi
         write_result "${port}" "${path}" "${password}"
         return 0
     fi

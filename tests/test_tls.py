@@ -42,6 +42,10 @@ def test_install_sh_tls_contract():
     ).read_text(encoding="utf-8")
     assert "--resolve" in text
     assert "cfg_get ssl_enabled" in text
+    assert "TLS_DID_CERTBOT" in text
+    assert "protected_site_domain" in text
+    assert "tls_uninstall_should_delete_cert" in text
+    assert "server_name_mentions" in text
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
@@ -75,6 +79,8 @@ def test_vtests_status_and_port_tls_contract():
     assert "proxy_pass" in text
     assert "SSL_ENABLED" in text
     assert "managed-by: vtests" in text
+    assert "nginx -t" in text
+    assert "已还原 vhost" in text
 
 
 def test_web_ui_shows_domain_readonly():

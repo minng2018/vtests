@@ -54,7 +54,7 @@ show_info() {
 
 vhost_is_ours() {
     local file=$1 domain=${2:-}
-    local real base
+    local real base escaped
     [[ -e "${file}" || -L "${file}" ]] || return 1
     real=$(readlink -f "${file}" 2>/dev/null || printf '%s' "${file}")
     [[ -f "${real}" ]] || return 1
@@ -64,15 +64,19 @@ vhost_is_ours() {
     base=$(basename "${real}")
     [[ "${base}" == "vtests.conf" ]] || return 1
     [[ -n "${domain}" ]] || return 1
-    grep -E "^[[:space:]]*server_name[[:space:]]+${domain}[[:space:];]" "${real}" >/dev/null 2>&1
+    escaped=$(printf '%s' "${domain}" | sed 's/[.[*^$()+?{|]/\\&/g')
+    grep -E "^[[:space:]]*server_name[[:space:]]+([^;]*[[:space:]])?${escaped}([[:space:]]|;|$)" "${real}" >/dev/null 2>&1
 }
 
 sync_vhost_proxy_pass() {
     local port=$1
     local domain=${2:-}
     local available=/etc/nginx/sites-available/vtests.conf
+    local bak
     [[ -f "${available}" ]] || return 0
     vhost_is_ours "${available}" "${domain}" || return 0
+    bak=$(mktemp)
+    cp -a "${available}" "${bak}"
     python3 - "${available}" "${port}" <<'PY'
 import re, sys
 path, port = sys.argv[1], sys.argv[2]
@@ -87,8 +91,22 @@ if new != text:
         fh.write(new)
 PY
     if command -v nginx >/dev/null 2>&1; then
-        nginx -t && systemctl reload nginx
+        if ! nginx -t >/dev/null 2>&1; then
+            cp -a "${bak}" "${available}"
+            rm -f "${bak}"
+            echo "nginx -t 失败，已还原 vhost，端口未改"
+            return 1
+        fi
+        if ! systemctl reload nginx; then
+            cp -a "${bak}" "${available}"
+            systemctl reload nginx >/dev/null 2>&1 || true
+            rm -f "${bak}"
+            echo "nginx reload 失败，已还原 vhost，端口未改"
+            return 1
+        fi
     fi
+    rm -f "${bak}"
+    return 0
 }
 
 reset_password() {
@@ -121,6 +139,17 @@ change_port() {
         echo "端口无效"
         return
     fi
+    local ssl_on=0 domain="" base=""
+    if [[ -f ${CONF} ]]; then
+        ssl_on=$(python3 -c 'import json,sys; print(1 if json.load(open(sys.argv[1])).get("ssl_enabled") else 0)' "${CONF}" 2>/dev/null || echo 0)
+        domain=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("domain") or "")' "${CONF}" 2>/dev/null || true)
+    fi
+    if [[ "${ssl_on}" == "1" ]]; then
+        if ! sync_vhost_proxy_pass "${port}" "${domain}"; then
+            echo "nginx 配置未通过，端口未修改"
+            return 1
+        fi
+    fi
     as_vtests PYTHONPATH="${APP_ROOT}" VTESTS_CONFIG="${CONF}" "${APP_PY}" - "${port}" <<'PY'
 import sys
 sys.path.insert(0, "/opt/vtests")
@@ -133,11 +162,6 @@ def mutate(cfg):
 
 update_config(mutate)
 PY
-    local ssl_on=0 domain="" base=""
-    if [[ -f ${CONF} ]]; then
-        ssl_on=$(python3 -c 'import json,sys; print(1 if json.load(open(sys.argv[1])).get("ssl_enabled") else 0)' "${CONF}" 2>/dev/null || echo 0)
-        domain=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("domain") or "")' "${CONF}" 2>/dev/null || true)
-    fi
     if [[ -f ${RESULT} ]]; then
         # shellcheck source=/dev/null
         . ${RESULT}
@@ -154,9 +178,6 @@ PY
         fi
         chown root:root ${RESULT}
         chmod 600 ${RESULT}
-    fi
-    if [[ "${ssl_on}" == "1" ]]; then
-        sync_vhost_proxy_pass "${port}" "${domain}"
     fi
     systemctl restart vtests
     echo "已改为 ${port} 并重启面板服务"

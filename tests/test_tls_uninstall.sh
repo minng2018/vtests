@@ -21,6 +21,10 @@ valid_domain "127.0.0.1" && fail "ipv4 literal must be rejected"
 valid_domain "https://vt-frp.beeorbit.net" && fail "protocol must be rejected"
 valid_domain "vt-frp.beeorbit.net/path" && fail "path must be rejected"
 valid_domain "" && fail "empty must be rejected"
+valid_domain "beeman.beeorbit.net" && fail "beeman must be refused as panel domain"
+valid_domain "beenovel.beeorbit.net" && fail "beenovel must be refused as panel domain"
+protected_site_domain "beeman.beeorbit.net" || fail "beeman is protected"
+protected_site_domain "vt-frp.beeorbit.net" && fail "panel domain is not protected"
 pass "domain validation"
 
 # --- cert delete whitelist ---
@@ -80,6 +84,37 @@ vhost_is_ours "${claim}/beeman.conf" "vt-frp.beeorbit.net" && fail "beeman vhost
 vhost_is_ours "${claim}/beeman.conf" "beeman.beeorbit.net" && fail "foreign filename must not be claimed"
 pass "vhost claim (managed-by / filename+server_name)"
 
+# --- server_name occupancy (typical single-space line) ---
+export VTESTS_NGINX_ROOT="${claim}/nginx"
+mkdir -p "${VTESTS_NGINX_ROOT}/sites-enabled"
+cat > "${VTESTS_NGINX_ROOT}/sites-enabled/beeman.conf" <<'EOF'
+server {
+    listen 80;
+    server_name beeman.beeorbit.net;
+}
+EOF
+server_name_taken "beeman.beeorbit.net" || fail "single-space server_name must match"
+server_name_taken "beenovel.beeorbit.net" && fail "other name must not match beeman vhost"
+server_name_taken "vt-frp.beeorbit.net" && fail "panel name must not match beeman vhost"
+cat > "${VTESTS_NGINX_ROOT}/sites-enabled/multi.conf" <<'EOF'
+    server_name foo.example.com vt-frp.beeorbit.net;
+EOF
+server_name_taken "vt-frp.beeorbit.net" || fail "domain among several server_name tokens must match"
+# skip our own vhost
+cat > "${VTESTS_NGINX_ROOT}/sites-enabled/vtests.conf" <<'EOF'
+    server_name already.example;
+EOF
+server_name_taken "already.example" && fail "must ignore sites-enabled/vtests.conf"
+# nullglob must not leak
+shopt -u nullglob
+server_name_taken "no-such.example" && fail "no-such should not be taken"
+if shopt -q nullglob; then
+    fail "nullglob leaked from server_name_taken"
+fi
+unset VTESTS_NGINX_ROOT
+tls_paths
+pass "server_name_taken matches typical vhosts and restores nullglob"
+
 # --- dry-run vhost render ---
 http_body=$(render_vhost http vt-frp.beeorbit.net 41234) || fail "render http"
 printf '%s\n' "${http_body}" | grep -q "managed-by: vtests" || fail "http header marker"
@@ -125,13 +160,68 @@ grep -qx "keep-beenovel" "${VTESTS_NGINX_ROOT}/sites-available/beenovel.conf" ||
 [[ -e "${VTESTS_NGINX_ROOT}/sites-available/vtests.conf" ]] && fail "vtests vhost must not survive restore"
 pass "rollback restores nginx backup"
 
-# setup_tls dry-run writes then tls_fallback restores
-printf 'keep-beeman\n' > "${VTESTS_NGINX_ROOT}/sites-available/beeman.conf"
+# setup_tls dry-run writes then tls_fallback restores (valid nginx so fixture -t can run)
+cat > "${VTESTS_NGINX_ROOT}/sites-available/beeman.conf" <<'EOF'
+server {
+    listen 80;
+    server_name beeman.beeorbit.net;
+    return 200;
+}
+EOF
+cat > "${VTESTS_NGINX_ROOT}/sites-available/beenovel.conf" <<'EOF'
+server {
+    listen 80;
+    server_name beenovel.beeorbit.net;
+    return 200;
+}
+EOF
 export VTESTS_PORT=41234
+export VTESTS_CERTBOT_CERTIFICATES_FILE="${ROOT}/tests/fixtures/certbot-certificates-beeman.txt"
 setup_tls "vt-frp.beeorbit.net" && fail "dry-run setup_tls should return 1"
-tls_fallback || fail "tls_fallback must return 0"
-grep -qx "keep-beeman" "${VTESTS_NGINX_ROOT}/sites-available/beeman.conf" || fail "fallback must keep beeman"
+[[ "${TLS_DID_CERTBOT:-0}" == "1" ]] && fail "dry-run must not set TLS_DID_CERTBOT"
+fb=$(tls_fallback)
+printf '%s\n' "${fb}" | grep -q "would certbot delete" && fail "fallback without certbot must not delete certs"
+grep -q "server_name beeman.beeorbit.net" "${VTESTS_NGINX_ROOT}/sites-available/beeman.conf" \
+    || fail "fallback must keep beeman"
 pass "setup_tls || tls_fallback dry-run restores tree"
+
+backup_nginx || fail "backup before certbot-flag fallback"
+TLS_DID_CERTBOT=1
+TLS_DOMAIN="vt-frp.beeorbit.net"
+flag_fb=$(tls_fallback)
+printf '%s\n' "${flag_fb}" | grep -q "would certbot delete --cert-name vt-frp.beeorbit.net" \
+    || fail "after certbot invoke, fallback may delete panel-only cert"
+printf '%s\n' "${flag_fb}" | grep -q beeman && fail "fallback must never delete beeman"
+TLS_DID_CERTBOT=0
+pass "tls_fallback deletes cert only when TLS_DID_CERTBOT=1"
+
+tls_uninstall_should_delete_cert true "vt-frp.beeorbit.net" || fail "ssl+domain may delete panel cert"
+tls_uninstall_should_delete_cert false "vt-frp.beeorbit.net" && fail "ssl_enabled=false must not delete cert"
+tls_uninstall_should_delete_cert true "" && fail "empty domain must not delete cert"
+pass "uninstall cert delete gated on ssl_enabled"
+
+setup_tls "beeman.beeorbit.net" && fail "must refuse beeman as panel domain"
+[[ "${TLS_DID_CERTBOT:-0}" == "1" ]] && fail "refused domain must not invoke certbot"
+pass "protected production domains refused before write/certbot"
+
+if command -v nginx >/dev/null 2>&1; then
+    cat > "${VTESTS_NGINX_ROOT}/sites-available/vtests.conf" <<'EOF'
+# managed-by: vtests
+server {
+    listen 80;
+    server_name vt-frp.beeorbit.net;
+    location / { proxy_pass http://127.0.0.1:41234; }
+}
+EOF
+    ln -sfn "${VTESTS_NGINX_ROOT}/sites-available/vtests.conf" "${VTESTS_NGINX_ROOT}/sites-enabled/vtests.conf"
+    nginx_test || fail "dry-run fixture nginx -t should pass"
+    sync_vhost_proxy_pass 55551 "vt-frp.beeorbit.net" || fail "proxy_pass sync should pass nginx -t"
+    grep -q "proxy_pass http://127.0.0.1:55551;" "${VTESTS_NGINX_ROOT}/sites-available/vtests.conf" \
+        || fail "proxy_pass should update"
+    pass "dry-run VTESTS_NGINX_ROOT nginx -t"
+else
+    pass "nginx binary absent; skipped fixture nginx -t"
+fi
 
 # --- uninstall refuses foreign vhost ---
 printf '# not ours\nserver { server_name beeman.beeorbit.net; }\n' \
