@@ -14,19 +14,11 @@ Ubuntu 24.04 上的 VPS 稳定性 / 模拟负载工具。一条命令安装，�
 bash <(curl -Ls https://raw.githubusercontent.com/minng2018/vtests/main/install.sh)
 ```
 
-安装完成后会打印面板地址、随机路径和密码。之后可用：
+安装完成后会打印面板地址、随机路径和密码。之后可用 `vtests` 查看地址、启停面板服务、重置密码或卸载。
 
-```bash
-vtests
-```
+`vtests start` / `vtests stop` 控制的是面板服务 `vtests.service`，不是加压引擎。加压只在 Web 面板里开始或停止。
 
-查看地址、启停服务、重置密码或卸载。
-
-卸载：
-
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/minng2018/vtests/main/install.sh) uninstall
-```
+卸载走 `vtests uninstall`（菜单选项 7 相同），优先本机 `/opt/vtests/install.sh uninstall`；仅当该文件不存在时才回退到 GitHub 上的 `install.sh uninstall`。
 
 ## 功能
 

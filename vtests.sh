@@ -191,14 +191,27 @@ do_uninstall() {
     bash <(curl -Ls "https://raw.githubusercontent.com/minng2018/vtests/main/install.sh") uninstall
 }
 
+usage() {
+    echo "vtests 管理命令"
+    echo "启动/停止 = 面板服务 vtests.service，不是加压引擎。加压请在 Web 面板操作。"
+    echo "  status|info     查看面板信息"
+    echo "  start           启动面板服务 vtests.service"
+    echo "  stop            停止面板服务 vtests.service"
+    echo "  restart         重启面板服务 vtests.service"
+    echo "  password        重置面板密码"
+    echo "  port [端口]     修改面板端口"
+    echo "  uninstall       卸载（优先 /opt/vtests/install.sh）"
+    echo "无参数进入交互菜单。"
+}
+
 menu() {
     need_root
     echo "vtests 管理"
     echo "启动/停止 = 面板服务 vtests.service，不是加压引擎。加压请在 Web 面板操作。"
     echo "  1) 查看面板信息"
-    echo "  2) 启动面板"
-    echo "  3) 停止面板"
-    echo "  4) 重启面板"
+    echo "  2) 启动面板服务 vtests.service"
+    echo "  3) 停止面板服务 vtests.service"
+    echo "  4) 重启面板服务 vtests.service"
     echo "  5) 重置密码"
     echo "  6) 修改端口"
     echo "  7) 卸载"
@@ -223,6 +236,7 @@ menu() {
 }
 
 case "${1:-}" in
+    help|-h|--help) usage ;;
     status|info) need_root; show_info ;;
     start) need_root; systemctl start vtests ;;
     stop) need_root; systemctl stop vtests ;;
