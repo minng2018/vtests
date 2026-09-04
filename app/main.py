@@ -33,6 +33,7 @@ from app.auth import (
 )
 from app.config import (
     VALID_MODES,
+    coerce_listen_port,
     load_config,
     max_cpu_percent,
     max_memory_mb,
@@ -290,7 +291,7 @@ def main() -> None:
     uvicorn.run(
         app,
         host=str(cfg.get("listen") or "0.0.0.0"),
-        port=int(cfg.get("port") or 8088),
+        port=coerce_listen_port(cfg.get("port")),
         log_level="info",
     )
 

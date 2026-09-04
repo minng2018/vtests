@@ -21,6 +21,7 @@ VALID_MODES = ("off", "manual", "schedule")
 RESERVED_PORTS = frozenset({22, 80, 443, 7000, 8080})
 PORT_MIN = 1024
 PORT_MAX = 62000
+FALLBACK_PORT = 45123
 
 _THREAD_LOCK = threading.RLock()
 
@@ -130,7 +131,17 @@ def pick_listen_port(*, used: set[int] | None = None, check_bind: bool = False) 
         if check_bind and _port_in_use(port):
             continue
         return port
-    return 45123
+    return FALLBACK_PORT
+
+
+def coerce_listen_port(value: Any) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return FALLBACK_PORT
+    if not (1 <= port <= 65535):
+        return FALLBACK_PORT
+    return port
 
 
 def pick_base_path() -> str:
@@ -153,7 +164,7 @@ def capped_cpu_mem(cfg: dict[str, Any], total_mb: int, avail_mb: int) -> tuple[i
     return cpu, mem
 
 
-def default_config() -> dict[str, Any]:
+def default_config(*, check_bind: bool = False) -> dict[str, Any]:
     info = meminfo()
     total = info["total_mb"]
     if total <= 1536:
@@ -171,7 +182,7 @@ def default_config() -> dict[str, Any]:
     listen = os.environ.get("VTESTS_LISTEN") or "0.0.0.0"
     cfg = {
         "listen": listen,
-        "port": pick_listen_port(check_bind=True),
+        "port": pick_listen_port(check_bind=check_bind),
         "base_path": pick_base_path(),
         "password": password,
         "secret": secrets.token_hex(32),
@@ -250,7 +261,7 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "timezone": cfg.get("timezone") or "Asia/Shanghai",
         "enabled": bool(cfg.get("enabled")),
         "paused": bool(cfg.get("paused")),
-        "port": int(cfg.get("port") or 8088),
+        "port": coerce_listen_port(cfg.get("port")),
         "mode": cfg.get("mode") if cfg.get("mode") in VALID_MODES else "off",
         "paused_until_next_window": bool(cfg.get("paused_until_next_window")),
     }
@@ -259,7 +270,7 @@ def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
 def _coerce_fields(cfg: dict[str, Any]) -> None:
     cfg["cpu_percent"] = int(max(0, min(100, int(cfg.get("cpu_percent", 10)))))
     cfg["memory_mb"] = int(max(0, int(cfg.get("memory_mb", 0))))
-    cfg["port"] = int(cfg.get("port", 8088))
+    cfg["port"] = coerce_listen_port(cfg.get("port"))
     base = str(cfg.get("base_path") or "/").strip() or "/"
     if not base.startswith("/"):
         base = "/" + base
@@ -324,6 +335,7 @@ def _atomic_write(path: Path, cfg: dict[str, Any]) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass
+    _chown_vtests(path)
     try:
         dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -345,6 +357,7 @@ def _file_lock(exclusive: bool):
         os.fchmod(fd, 0o600)
     except OSError:
         pass
+    _chown_vtests(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         yield
@@ -363,10 +376,23 @@ def config_lock(exclusive: bool = False):
             yield
 
 
+def _chown_vtests(path: Path) -> None:
+    try:
+        import pwd
+
+        ent = pwd.getpwnam("vtests")
+    except (LookupError, ImportError, OSError):
+        return
+    try:
+        os.chown(path, ent.pw_uid, ent.pw_gid)
+    except OSError:
+        pass
+
+
 def load_config() -> dict[str, Any]:
     path = config_path()
     if not path.exists():
-        cfg = default_config()
+        cfg = default_config(check_bind=True)
         save_config(cfg)
         return cfg
     with config_lock(exclusive=False):

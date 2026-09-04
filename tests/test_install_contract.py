@@ -15,6 +15,8 @@ def test_unit_non_root_no_hardcoded_memorymax():
     assert "User=vtests" in text
     assert "Group=vtests" in text
     assert "WorkingDirectory=/var/lib/vtests" in text
+    assert "StateDirectoryMode=0750" in text
+    assert "LogsDirectoryMode=0750" in text
     assert "MemoryMax=240" not in text
     assert "MemoryMax=240M" not in text
     assert "单进程" in text

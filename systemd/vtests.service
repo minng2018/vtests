@@ -22,6 +22,8 @@ ConfigurationDirectory=vtests
 StateDirectory=vtests
 LogsDirectory=vtests
 ConfigurationDirectoryMode=0700
+StateDirectoryMode=0750
+LogsDirectoryMode=0750
 ReadWritePaths=/etc/vtests /var/lib/vtests /var/log/vtests
 LimitNOFILE=4096
 # MemoryMax / CPUQuota 由 install.sh 写入 drop-in，不要在此写死 240M

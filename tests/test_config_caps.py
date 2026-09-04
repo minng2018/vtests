@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
+import pwd
 
 from app.config import (
+    FALLBACK_PORT,
     PORT_MAX,
     PORT_MIN,
     capped_cpu_mem,
+    coerce_listen_port,
     default_config,
     load_config,
     max_cpu_percent,
     max_memory_mb,
     pick_listen_port,
     port_is_reserved,
+    public_config,
     render_systemd_limits,
     save_config,
     sidecar_lock_path,
@@ -288,3 +293,155 @@ def test_pick_listen_port_skips_reserved_and_used(monkeypatch):
 def test_pick_listen_port_honors_env(monkeypatch):
     monkeypatch.setenv("VTESTS_PORT", "41234")
     assert pick_listen_port(used={41234, 22}) == 41234
+
+
+def test_load_existing_does_not_bind(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    monkeypatch.delenv("VTESTS_PORT", raising=False)
+    _patch_small_host(monkeypatch)
+    save_config(
+        {
+            "port": 41234,
+            "base_path": "/x",
+            "password": "pw",
+            "secret": "aa",
+            "cpu_percent": 10,
+            "memory_mb": 64,
+            "mode": "off",
+            "schedule_start": "09:00",
+            "schedule_end": "22:00",
+            "timezone": "UTC",
+        }
+    )
+
+    def boom(_port: int) -> bool:
+        raise AssertionError("load of existing config must not bind")
+
+    monkeypatch.setattr("app.config._port_in_use", boom)
+    loaded = load_config()
+    assert loaded["port"] == 41234
+
+
+def test_new_config_bind_checks(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    monkeypatch.delenv("VTESTS_PORT", raising=False)
+    _patch_small_host(monkeypatch)
+    seen: list[int] = []
+
+    def spy(port: int) -> bool:
+        seen.append(port)
+        return False
+
+    monkeypatch.setattr("app.config._port_in_use", spy)
+    loaded = load_config()
+    assert cfg_path.exists()
+    assert seen
+    assert loaded["port"] == seen[0]
+
+
+def test_missing_and_zero_port_fallback_not_8088(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    _patch_small_host(monkeypatch)
+    save_config(
+        {
+            "base_path": "/x",
+            "password": "pw",
+            "secret": "aa",
+            "cpu_percent": 10,
+            "memory_mb": 64,
+            "mode": "off",
+            "schedule_start": "09:00",
+            "schedule_end": "22:00",
+            "timezone": "UTC",
+        }
+    )
+    loaded = load_config()
+    assert loaded["port"] == FALLBACK_PORT
+    assert coerce_listen_port(None) == FALLBACK_PORT
+    assert coerce_listen_port(0) == FALLBACK_PORT
+    assert public_config(loaded)["port"] == FALLBACK_PORT
+
+
+def test_explicit_8088_preserved(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    _patch_small_host(monkeypatch)
+    save_config(
+        {
+            "port": 8088,
+            "base_path": "/x",
+            "password": "pw",
+            "secret": "aa",
+            "cpu_percent": 10,
+            "memory_mb": 64,
+            "mode": "off",
+            "schedule_start": "09:00",
+            "schedule_end": "22:00",
+            "timezone": "UTC",
+        }
+    )
+    loaded = load_config()
+    assert loaded["port"] == 8088
+    assert public_config(loaded)["port"] == 8088
+
+
+def test_atomic_write_chowns_vtests_when_present(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    _patch_small_host(monkeypatch)
+
+    class Ent:
+        pw_uid = 4242
+        pw_gid = 4242
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: Ent() if name == "vtests" else (_ for _ in ()).throw(KeyError(name)))
+    seen: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: seen.append((os.path.basename(str(path)), uid, gid)))
+    save_config(
+        {
+            "port": 41234,
+            "base_path": "/x",
+            "password": "pw",
+            "secret": "aa",
+            "cpu_percent": 10,
+            "memory_mb": 64,
+            "mode": "off",
+            "schedule_start": "09:00",
+            "schedule_end": "22:00",
+            "timezone": "UTC",
+        }
+    )
+    names = {name for name, uid, gid in seen}
+    assert "config.json" in names
+    assert "config.json.lock" in names
+    assert all(uid == 4242 and gid == 4242 for _, uid, gid in seen)
+
+
+def test_atomic_write_skips_chown_without_vtests(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    _patch_small_host(monkeypatch)
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("chown must not run when vtests is missing")
+
+    monkeypatch.setattr(os, "chown", boom)
+    save_config(
+        {
+            "port": 41234,
+            "base_path": "/x",
+            "password": "pw",
+            "secret": "aa",
+            "cpu_percent": 10,
+            "memory_mb": 64,
+            "mode": "off",
+            "schedule_start": "09:00",
+            "schedule_end": "22:00",
+            "timezone": "UTC",
+        }
+    )
+    assert cfg_path.exists()
