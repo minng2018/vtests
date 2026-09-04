@@ -4,11 +4,18 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.config import VALID_MODES, apply_legacy_migration, sync_legacy_from_mode
+from app.config import (
+    VALID_MODES,
+    apply_legacy_migration,
+    load_config,
+    sync_legacy_from_mode,
+    update_config,
+)
 
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d(?:\:[0-5]\d)?$")
 
@@ -83,3 +90,61 @@ def apply_stop(cfg: dict[str, Any]) -> dict[str, Any]:
         cfg["paused_until_next_window"] = False
     sync_legacy_from_mode(cfg)
     return cfg
+
+
+def clear_pause_on_rising_edge(
+    cfg: dict[str, Any],
+    last_in_window: bool | None,
+    now: datetime | None = None,
+) -> tuple[bool, bool]:
+    window = in_window(cfg, now)
+    if (
+        cfg.get("mode") == "schedule"
+        and last_in_window is False
+        and window
+        and cfg.get("paused_until_next_window")
+    ):
+        cfg["paused_until_next_window"] = False
+        sync_legacy_from_mode(cfg)
+        return window, True
+    return window, False
+
+
+class Watchdog:
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_in_window: bool | None = None
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="vtests-wd", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def tick(self, now: datetime | None = None) -> None:
+        cfg = load_config()
+        window, mutated = clear_pause_on_rising_edge(cfg, self._last_in_window, now)
+        if mutated:
+            last = self._last_in_window
+
+            def _clear_pause(cur: dict[str, Any]) -> None:
+                clear_pause_on_rising_edge(cur, last, now)
+
+            cfg = update_config(_clear_pause)
+        self._last_in_window = window
+        want = should_run(cfg, now)
+        alive = self.engine.alive()
+        if want and not alive:
+            self.engine.start(cfg)
+        elif not want and alive:
+            self.engine.stop()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(2):
+            self.tick()

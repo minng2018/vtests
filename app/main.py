@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -44,7 +43,14 @@ from app.config import (
 )
 from app.engine import LoadEngine
 from app.metrics import CpuSampler, cpu_count, meminfo
-from app.scheduler import apply_start, apply_stop, in_window, normalize_hhmm, should_run
+from app.scheduler import (
+    Watchdog,
+    apply_start,
+    apply_stop,
+    in_window,
+    normalize_hhmm,
+    should_run,
+)
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -56,47 +62,6 @@ def _version() -> str:
         return VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0"
     except OSError:
         return "0.0.0"
-
-
-class Watchdog:
-    def __init__(self, engine: LoadEngine) -> None:
-        self.engine = engine
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._last_in_window: bool | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="vtests-wd", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2)
-
-    def _loop(self) -> None:
-        while not self._stop.wait(2):
-            cfg = load_config()
-            window = in_window(cfg)
-            if (
-                cfg.get("mode") == "schedule"
-                and self._last_in_window is False
-                and window
-                and cfg.get("paused_until_next_window")
-            ):
-                def _clear_pause(cur: dict[str, Any]) -> None:
-                    if cur.get("mode") == "schedule" and cur.get("paused_until_next_window"):
-                        cur["paused_until_next_window"] = False
-                        sync_legacy_from_mode(cur)
-
-                cfg = update_config(_clear_pause)
-            self._last_in_window = window
-            want = should_run(cfg)
-            alive = self.engine.alive()
-            if want and not alive:
-                self.engine.start(cfg)
-            elif not want and alive:
-                self.engine.stop()
 
 
 SAMPLER = CpuSampler()
@@ -286,7 +251,8 @@ async def api_start(request: Request):
     if not authorized(request):
         return deny()
     cfg = update_config(apply_start)
-    ENGINE.start(cfg)
+    if should_run(cfg):
+        ENGINE.start(cfg)
     return {"ok": True, "running": ENGINE.alive(), "error": ENGINE.error()}
 
 

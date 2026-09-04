@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pytest
 from zoneinfo import ZoneInfo
 
-from app.config import migrate_config, public_config
-from app.scheduler import apply_start, apply_stop, in_window, should_run
+from app.config import load_config, migrate_config, public_config, save_config
+from app.scheduler import (
+    Watchdog,
+    apply_start,
+    apply_stop,
+    clear_pause_on_rising_edge,
+    in_window,
+    should_run,
+)
 
 
 def _cfg(**kwargs):
@@ -195,3 +203,176 @@ def test_public_config_keeps_legacy_keys():
     assert pub["paused_until_next_window"] is False
     assert pub["enabled"] is True
     assert pub["schedule_enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "paused", "action", "hour", "exp_mode", "exp_paused", "exp_run"),
+    [
+        ("schedule", False, "stop", 12, "schedule", True, False),
+        ("schedule", True, "stop", 12, "schedule", True, False),
+        ("schedule", False, "stop", 3, "schedule", True, False),
+        ("manual", False, "stop", 12, "off", False, False),
+        ("off", False, "stop", 12, "off", False, False),
+        ("off", True, "stop", 12, "off", False, False),
+        ("schedule", True, "start", 12, "schedule", False, True),
+        ("schedule", True, "start", 3, "schedule", False, False),
+        ("schedule", False, "start", 3, "schedule", False, False),
+        ("schedule", False, "start", 12, "schedule", False, True),
+        ("off", False, "start", 3, "manual", False, True),
+        ("off", True, "start", 12, "manual", False, True),
+        ("manual", False, "start", 3, "manual", False, True),
+        ("manual", True, "start", 3, "manual", False, True),
+    ],
+)
+def test_start_stop_table(mode, paused, action, hour, exp_mode, exp_paused, exp_run):
+    cfg = _cfg(mode=mode, paused_until_next_window=paused)
+    if action == "start":
+        apply_start(cfg)
+    else:
+        apply_stop(cfg)
+    assert cfg["mode"] == exp_mode
+    assert cfg["paused_until_next_window"] is exp_paused
+    assert should_run(cfg, _at(hour, 0)) is exp_run
+    if exp_mode == "schedule":
+        assert cfg["schedule_enabled"] is True
+        assert cfg["enabled"] is True
+        assert cfg["paused"] is exp_paused
+    elif exp_mode == "manual":
+        assert cfg["schedule_enabled"] is False
+        assert cfg["enabled"] is True
+        assert cfg["paused"] is False
+    else:
+        assert cfg["schedule_enabled"] is False
+        assert cfg["enabled"] is False
+        assert cfg["paused"] is False
+
+
+def test_start_schedule_outside_window_waits():
+    cfg = _cfg(mode="schedule", paused_until_next_window=True)
+    apply_start(cfg)
+    assert cfg["mode"] == "schedule"
+    assert cfg["paused_until_next_window"] is False
+    assert should_run(cfg, _at(3, 0)) is False
+    assert should_run(cfg, _at(12, 0)) is True
+
+
+def test_clear_pause_only_on_false_to_true_edge():
+    cfg = _cfg(mode="schedule", paused_until_next_window=True, enabled=True, paused=True)
+    window, mutated = clear_pause_on_rising_edge(cfg, True, _at(12, 0))
+    assert window is True
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    window, mutated = clear_pause_on_rising_edge(cfg, None, _at(12, 0))
+    assert window is True
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    window, mutated = clear_pause_on_rising_edge(cfg, False, _at(3, 0))
+    assert window is False
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    window, mutated = clear_pause_on_rising_edge(cfg, False, _at(12, 0))
+    assert window is True
+    assert mutated is True
+    assert cfg["paused_until_next_window"] is False
+    assert cfg["paused"] is False
+    assert cfg["mode"] == "schedule"
+    assert cfg["enabled"] is True
+    assert cfg["schedule_enabled"] is True
+
+
+def test_watchdog_does_not_set_enabled_on_window_edges():
+    cfg = _cfg(mode="schedule", paused_until_next_window=False, enabled=True)
+    window, mutated = clear_pause_on_rising_edge(cfg, True, _at(3, 0))
+    assert window is False
+    assert mutated is False
+    assert cfg["enabled"] is True
+    assert cfg["paused_until_next_window"] is False
+
+    window, mutated = clear_pause_on_rising_edge(cfg, False, _at(12, 0))
+    assert window is True
+    assert mutated is False
+    assert cfg["enabled"] is True
+    assert cfg["mode"] == "schedule"
+
+
+class _FakeEngine:
+    def __init__(self) -> None:
+        self.starts = 0
+        self.stops = 0
+        self._alive = False
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def start(self, _cfg) -> None:
+        self.starts += 1
+        self._alive = True
+
+    def stop(self) -> None:
+        self.stops += 1
+        self._alive = False
+
+
+def test_watchdog_tick_rising_edge_clears_pause_only(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    save_config(_cfg(mode="schedule", paused_until_next_window=True))
+    engine = _FakeEngine()
+    wd = Watchdog(engine)
+    wd._last_in_window = False
+    wd.tick(now=_at(12, 0))
+    loaded = load_config()
+    assert loaded["paused_until_next_window"] is False
+    assert loaded["paused"] is False
+    assert loaded["mode"] == "schedule"
+    assert loaded["enabled"] is True
+    assert loaded["schedule_enabled"] is True
+    assert engine.alive() is True
+    assert engine.starts == 1
+    assert engine.stops == 0
+
+
+def test_watchdog_tick_does_not_rewrite_enabled(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    save_config(_cfg(mode="schedule", paused_until_next_window=False))
+    engine = _FakeEngine()
+    engine.start({})
+    wd = Watchdog(engine)
+    wd._last_in_window = True
+    before = json.loads(cfg_path.read_text(encoding="utf-8"))
+    mtime = cfg_path.stat().st_mtime_ns
+    wd.tick(now=_at(3, 0))
+    after = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert cfg_path.stat().st_mtime_ns == mtime
+    assert after == before
+    assert after["enabled"] is True
+    assert engine.alive() is False
+    assert engine.stops == 1
+
+    wd.tick(now=_at(12, 0))
+    after_rise = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert cfg_path.stat().st_mtime_ns == mtime
+    assert after_rise == before
+    assert after_rise["enabled"] is True
+    assert engine.alive() is True
+    assert engine.starts == 2
+
+
+def test_watchdog_first_tick_is_not_rising_edge(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    save_config(_cfg(mode="schedule", paused_until_next_window=True))
+    engine = _FakeEngine()
+    wd = Watchdog(engine)
+    before = json.loads(cfg_path.read_text(encoding="utf-8"))
+    wd.tick(now=_at(12, 0))
+    after = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert after == before
+    assert after["paused_until_next_window"] is True
+    assert after["enabled"] is True
+    assert engine.alive() is False
+    assert engine.starts == 0
