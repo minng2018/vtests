@@ -3,13 +3,20 @@ from __future__ import annotations
 import json
 
 from app.config import (
+    PORT_MAX,
+    PORT_MIN,
     capped_cpu_mem,
     default_config,
     load_config,
     max_cpu_percent,
     max_memory_mb,
+    pick_listen_port,
+    port_is_reserved,
+    render_systemd_limits,
     save_config,
     sidecar_lock_path,
+    systemd_cpu_quota_percent,
+    systemd_memory_max_mb,
     update_config,
 )
 
@@ -170,11 +177,16 @@ def test_load_migrates_spike_keys(tmp_path, monkeypatch):
 
 def test_small_host_defaults(monkeypatch):
     _patch_small_host(monkeypatch)
+    monkeypatch.delenv("VTESTS_PORT", raising=False)
+    monkeypatch.delenv("VTESTS_WEB_BASE_PATH", raising=False)
     cfg = default_config()
     assert cfg["cpu_percent"] == 10
     assert cfg["memory_mb"] == 64
     assert cfg["mode"] == "off"
     assert cfg["paused_until_next_window"] is False
+    assert PORT_MIN <= cfg["port"] <= PORT_MAX
+    assert not port_is_reserved(cfg["port"])
+    assert 8 <= len(str(cfg["base_path"]).lstrip("/")) <= 12
 
 
 def test_avail_dip_does_not_persist_memory_mb(tmp_path, monkeypatch):
@@ -247,3 +259,32 @@ def test_user_save_during_dip_keeps_requested_memory(tmp_path, monkeypatch):
     loaded = load_config()
     assert loaded["memory_mb"] == 64
     assert capped_cpu_mem(loaded, 954, 300)[1] == 0
+
+
+def test_systemd_memory_max_formula():
+    assert systemd_memory_max_mb(954, 550) == 292
+    assert systemd_cpu_quota_percent(954) == 100
+    assert systemd_cpu_quota_percent(1536) == 100
+    assert systemd_cpu_quota_percent(1537) is None
+    text = render_systemd_limits(954, 550)
+    assert text.startswith("[Service]\n")
+    assert "MemoryMax=292M" in text
+    assert "CPUQuota=100%" in text
+    larger = render_systemd_limits(4096, 3000)
+    assert "MemoryMax=1188M" in larger
+    assert "CPUQuota" not in larger
+
+
+def test_pick_listen_port_skips_reserved_and_used(monkeypatch):
+    monkeypatch.delenv("VTESTS_PORT", raising=False)
+    used = {22, 80, 443, 7000, 8080, 8088, 45123}
+    for _ in range(40):
+        port = pick_listen_port(used=used)
+        assert PORT_MIN <= port <= PORT_MAX
+        assert port not in used
+        assert not port_is_reserved(port)
+
+
+def test_pick_listen_port_honors_env(monkeypatch):
+    monkeypatch.setenv("VTESTS_PORT", "41234")
+    assert pick_listen_port(used={41234, 22}) == 41234

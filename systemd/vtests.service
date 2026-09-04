@@ -1,13 +1,15 @@
 [Unit]
 Description=vtests VPS load control plane
-After=network-online.target
+After=network-online.target nginx.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/opt/vtests
+User=vtests
+Group=vtests
+WorkingDirectory=/var/lib/vtests
 Environment=VTESTS_CONFIG=/etc/vtests/config.json
+# 单进程；禁止改成 --workers N 或 gunicorn
 ExecStart=/opt/vtests/venv/bin/python /opt/vtests/app/main.py
 Restart=on-failure
 RestartSec=3
@@ -22,6 +24,7 @@ LogsDirectory=vtests
 ConfigurationDirectoryMode=0700
 ReadWritePaths=/etc/vtests /var/lib/vtests /var/log/vtests
 LimitNOFILE=4096
+# MemoryMax / CPUQuota 由 install.sh 写入 drop-in，不要在此写死 240M
 TasksMax=64
 Nice=5
 

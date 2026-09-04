@@ -270,7 +270,22 @@ async def healthz():
     return {"ok": True, "version": _version()}
 
 
+def _assert_runtime() -> None:
+    workers = str(os.environ.get("UVICORN_WORKERS") or "").strip()
+    if workers:
+        try:
+            n = int(workers)
+        except ValueError:
+            n = 1
+        if n > 1:
+            sys.stderr.write("vtests 必须单进程，拒绝 UVICORN_WORKERS>1\n")
+            raise SystemExit(1)
+    if os.geteuid() == 0:
+        sys.stderr.write("warning: 以 root 运行；生产 unit 应为 User=vtests\n")
+
+
 def main() -> None:
+    _assert_runtime()
     cfg = load_config()
     uvicorn.run(
         app,

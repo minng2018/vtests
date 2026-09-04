@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import secrets
+import socket
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -17,6 +18,9 @@ from app.metrics import meminfo
 
 ROOT = Path(__file__).resolve().parent
 VALID_MODES = ("off", "manual", "schedule")
+RESERVED_PORTS = frozenset({22, 80, 443, 7000, 8080})
+PORT_MIN = 1024
+PORT_MAX = 62000
 
 _THREAD_LOCK = threading.RLock()
 
@@ -64,6 +68,83 @@ def max_cpu_percent(total_mb: int) -> int:
     return 100
 
 
+def systemd_memory_max_mb(total_mb: int, avail_mb: int) -> int:
+    return 100 + max_memory_mb(total_mb, avail_mb) + 64
+
+
+def systemd_cpu_quota_percent(total_mb: int) -> int | None:
+    if total_mb <= 1536:
+        return 100
+    return None
+
+
+def render_systemd_limits(total_mb: int | None = None, avail_mb: int | None = None) -> str:
+    if total_mb is None or avail_mb is None:
+        info = meminfo()
+        total_mb = info["total_mb"]
+        avail_mb = info["avail_mb"]
+    lines = ["[Service]", f"MemoryMax={systemd_memory_max_mb(total_mb, avail_mb)}M"]
+    quota = systemd_cpu_quota_percent(total_mb)
+    if quota is not None:
+        lines.append(f"CPUQuota={quota}%")
+    return "\n".join(lines) + "\n"
+
+
+def port_is_reserved(port: int) -> bool:
+    return int(port) in RESERVED_PORTS
+
+
+def _port_in_use(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+    except OSError:
+        return True
+    finally:
+        sock.close()
+    return False
+
+
+def pick_listen_port(*, used: set[int] | None = None, check_bind: bool = False) -> int:
+    env = os.environ.get("VTESTS_PORT")
+    if env:
+        try:
+            value = int(env)
+        except ValueError:
+            value = 0
+        if 1 <= value <= 65535:
+            return value
+    blocked = set(RESERVED_PORTS)
+    if used:
+        blocked.update(int(p) for p in used)
+    for _ in range(128):
+        port = secrets.randbelow(PORT_MAX - PORT_MIN + 1) + PORT_MIN
+        if port in blocked:
+            continue
+        if check_bind and _port_in_use(port):
+            continue
+        return port
+    for port in range(PORT_MIN, PORT_MAX + 1):
+        if port in blocked:
+            continue
+        if check_bind and _port_in_use(port):
+            continue
+        return port
+    return 45123
+
+
+def pick_base_path() -> str:
+    env = os.environ.get("VTESTS_WEB_BASE_PATH")
+    if env and env.strip():
+        base = env.strip()
+        if not base.startswith("/"):
+            base = "/" + base
+        return base.rstrip("/") or ""
+    raw = secrets.token_urlsafe(9).rstrip("=")
+    n = 8 + secrets.randbelow(5)
+    return "/" + raw[:n]
+
+
 def capped_cpu_mem(cfg: dict[str, Any], total_mb: int, avail_mb: int) -> tuple[int, int]:
     cpu = int(cfg.get("cpu_percent") or 0)
     mem = int(cfg.get("memory_mb") or 0)
@@ -86,12 +167,14 @@ def default_config() -> dict[str, Any]:
         mem_default = 256
     cpu_cap = max_cpu_percent(total) if total else 100
     mem_cap = memory_hard_ceiling(total) if total else mem_default
+    password = os.environ.get("VTESTS_PASSWORD") or secrets.token_urlsafe(12)
+    listen = os.environ.get("VTESTS_LISTEN") or "0.0.0.0"
     cfg = {
-        "listen": "0.0.0.0",
-        "port": 8088,
-        "base_path": "/" + secrets.token_urlsafe(6).rstrip("="),
-        "password": secrets.token_urlsafe(12),
-        "secret": secrets.token_hex(16),
+        "listen": listen,
+        "port": pick_listen_port(check_bind=True),
+        "base_path": pick_base_path(),
+        "password": password,
+        "secret": secrets.token_hex(32),
         "cpu_percent": min(cpu_default, cpu_cap),
         "memory_mb": min(mem_default, mem_cap),
         "mode": "off",
