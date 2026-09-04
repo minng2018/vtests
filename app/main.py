@@ -4,9 +4,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import signal
-import subprocess
 import sys
 import threading
 from contextlib import asynccontextmanager
@@ -37,7 +34,6 @@ from app.auth import (
 )
 from app.config import (
     VALID_MODES,
-    capped_cpu_mem,
     load_config,
     max_cpu_percent,
     max_memory_mb,
@@ -46,6 +42,7 @@ from app.config import (
     sync_legacy_from_mode,
     update_config,
 )
+from app.engine import LoadEngine
 from app.metrics import CpuSampler, cpu_count, meminfo
 from app.scheduler import apply_start, apply_stop, in_window, normalize_hhmm, should_run
 
@@ -59,80 +56,6 @@ def _version() -> str:
         return VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0"
     except OSError:
         return "0.0.0"
-
-
-class LoadEngine:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._error = ""
-
-    def alive(self) -> bool:
-        with self._lock:
-            if self._proc is None:
-                return False
-            return self._proc.poll() is None
-
-    def error(self) -> str:
-        return self._error
-
-    def start(self, cfg: dict[str, Any]) -> None:
-        binary = shutil.which("stress-ng")
-        if not binary:
-            self._error = "未找到 stress-ng，请安装后重启服务"
-            return
-        info = meminfo()
-        cpu, mem = capped_cpu_mem(dict(cfg), info["total_mb"], info["avail_mb"])
-        cmd = [binary, "--timeout", "0"]
-        if cpu > 0:
-            cmd.extend(["--cpu", "0", "--cpu-load", str(cpu), "--cpu-method", "nop"])
-        if mem > 0:
-            cmd.extend(["--vm", "1", "--vm-bytes", f"{mem}M", "--vm-keep"])
-        if cpu <= 0 and mem <= 0:
-            self.stop()
-            return
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                self._kill_locked()
-            try:
-                self._proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                self._error = ""
-            except OSError as exc:
-                self._error = str(exc)
-                self._proc = None
-
-    def stop(self) -> None:
-        with self._lock:
-            self._kill_locked()
-
-    def _kill_locked(self) -> None:
-        proc = self._proc
-        self._proc = None
-        if proc is None:
-            return
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                proc.terminate()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
 
 
 class Watchdog:

@@ -1,5 +1,5 @@
 [Unit]
-Description=vtests VPS load simulator
+Description=vtests VPS load control plane
 After=network-online.target
 Wants=network-online.target
 
@@ -11,7 +11,19 @@ Environment=VTESTS_CONFIG=/etc/vtests/config.json
 ExecStart=/opt/vtests/venv/bin/python /opt/vtests/app/main.py
 Restart=on-failure
 RestartSec=3
-LimitNOFILE=65535
+KillMode=control-group
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ConfigurationDirectory=vtests
+StateDirectory=vtests
+LogsDirectory=vtests
+ConfigurationDirectoryMode=0700
+ReadWritePaths=/etc/vtests /var/lib/vtests /var/log/vtests
+LimitNOFILE=4096
+TasksMax=64
+Nice=5
 
 [Install]
 WantedBy=multi-user.target
