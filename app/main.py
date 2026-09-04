@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -26,6 +23,18 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from app.auth import (
+    COOKIE,
+    apply_session_cookie,
+    authorized,
+    client_rate_key,
+    make_token,
+    persist_password_hash,
+    rate_limit_retry_after,
+    record_login_failure,
+    record_login_success,
+    verify_password,
+)
 from app.config import (
     VALID_MODES,
     capped_cpu_mem,
@@ -43,7 +52,6 @@ from app.scheduler import apply_start, apply_stop, in_window, normalize_hhmm, sh
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 VERSION_FILE = ROOT.parent / "VERSION"
-COOKIE = "vtests_session"
 
 
 def _version() -> str:
@@ -186,31 +194,6 @@ if WEB_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(WEB_DIR)), name="assets")
 
 
-def make_token(secret: str) -> str:
-    ts = str(int(time.time()))
-    sig = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()[:32]
-    return f"{ts}.{sig}"
-
-
-def valid_token(token: str | None, secret: str) -> bool:
-    if not token or "." not in token:
-        return False
-    ts, sig = token.split(".", 1)
-    expect = hmac.new(secret.encode(), ts.encode(), hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(sig, expect):
-        return False
-    try:
-        age = abs(time.time() - int(ts))
-    except ValueError:
-        return False
-    return age < 7 * 24 * 3600
-
-
-def authorized(request: Request) -> bool:
-    cfg = load_config()
-    return valid_token(request.cookies.get(COOKIE), str(cfg.get("secret") or ""))
-
-
 def deny() -> JSONResponse:
     return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
 
@@ -269,23 +252,29 @@ async def api_status(request: Request):
 @app.post("/api/login")
 async def api_login(request: Request):
     cfg = load_config()
+    key = client_rate_key(request, cfg)
+    retry_after = rate_limit_retry_after(key)
+    if retry_after is not None:
+        return JSONResponse(
+            {"ok": False, "error": "尝试次数过多"},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     try:
         body = await request.json()
     except Exception:
         body = {}
     password = str(body.get("password") or "")
-    if not hmac.compare_digest(password, str(cfg.get("password") or "")):
+    ok, migrate = verify_password(password, cfg)
+    if not ok:
+        record_login_failure(key)
         return JSONResponse({"ok": False, "error": "密码错误"}, status_code=403)
-    token = make_token(str(cfg.get("secret") or "x"))
+    record_login_success(key)
+    if migrate:
+        cfg = persist_password_hash(password)
+    token = make_token(str(cfg.get("secret") or ""))
     resp = JSONResponse({"ok": True})
-    resp.set_cookie(
-        COOKIE,
-        token,
-        httponly=True,
-        samesite="lax",
-        path=str(cfg.get("base_path") or "/") or "/",
-        max_age=7 * 24 * 3600,
-    )
+    apply_session_cookie(resp, token, cfg)
     return resp
 
 

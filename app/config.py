@@ -198,6 +198,9 @@ def _prepare_for_write(cfg: dict[str, Any]) -> None:
 def _merge_saved(defaults: dict[str, Any], saved: dict[str, Any]) -> dict[str, Any]:
     merged = dict(defaults)
     merged.update(saved)
+    # A saved file that omitted plaintext must not pick up a fresh default password.
+    if "password" not in saved:
+        merged.pop("password", None)
     had_mode = saved.get("mode") in VALID_MODES
     apply_legacy_migration(merged, had_mode=had_mode)
     sync_legacy_from_mode(merged)
