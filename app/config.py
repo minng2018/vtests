@@ -38,15 +38,19 @@ def sidecar_lock_path(path: Path | None = None) -> Path:
     return target.with_name(target.name + ".lock")
 
 
+def memory_hard_ceiling(total_mb: int) -> int:
+    if total_mb <= 1536:
+        return 128
+    if total_mb <= 4096:
+        return min(1024, int(total_mb * 0.40))
+    return int(total_mb * 0.50)
+
+
 def max_memory_mb(total_mb: int, avail_mb: int) -> int:
     reserve = max(256, int(total_mb * 0.30))
     if total_mb <= 1536:
         reserve = max(reserve, 384)
-        hard_ceiling = 128
-    elif total_mb <= 4096:
-        hard_ceiling = min(1024, int(total_mb * 0.40))
-    else:
-        hard_ceiling = int(total_mb * 0.50)
+    hard_ceiling = memory_hard_ceiling(total_mb)
     from_avail = max(0, avail_mb - reserve)
     from_total = max(0, total_mb - reserve)
     return max(0, min(hard_ceiling, from_avail, from_total))
@@ -60,23 +64,17 @@ def max_cpu_percent(total_mb: int) -> int:
     return 100
 
 
-def clamp_resources(cfg: dict[str, Any], total_mb: int, avail_mb: int) -> dict[str, Any]:
+def capped_cpu_mem(cfg: dict[str, Any], total_mb: int, avail_mb: int) -> tuple[int, int]:
     cpu = int(cfg.get("cpu_percent") or 0)
     mem = int(cfg.get("memory_mb") or 0)
-    cfg["cpu_percent"] = max(0, min(cpu, max_cpu_percent(total_mb), 100))
-    cfg["memory_mb"] = max(0, min(mem, max_memory_mb(total_mb, avail_mb)))
-    return cfg
-
-
-def capped_cpu_mem(cfg: dict[str, Any], total_mb: int, avail_mb: int) -> tuple[int, int]:
-    clamp_resources(cfg, total_mb, avail_mb)
-    return int(cfg["cpu_percent"]), int(cfg["memory_mb"])
+    cpu = max(0, min(cpu, max_cpu_percent(total_mb), 100))
+    mem = max(0, min(mem, max_memory_mb(total_mb, avail_mb)))
+    return cpu, mem
 
 
 def default_config() -> dict[str, Any]:
     info = meminfo()
     total = info["total_mb"]
-    avail = info["avail_mb"]
     if total <= 1536:
         cpu_default = 10
         mem_default = 64
@@ -87,7 +85,7 @@ def default_config() -> dict[str, Any]:
         cpu_default = 20
         mem_default = 256
     cpu_cap = max_cpu_percent(total) if total else 100
-    mem_cap = max_memory_mb(total, avail) if total else mem_default
+    mem_cap = memory_hard_ceiling(total) if total else mem_default
     cfg = {
         "listen": "0.0.0.0",
         "port": 8088,
@@ -183,8 +181,11 @@ def _coerce_fields(cfg: dict[str, Any]) -> None:
     if not base.startswith("/"):
         base = "/" + base
     cfg["base_path"] = base.rstrip("/") or ""
-    info = meminfo()
-    clamp_resources(cfg, info["total_mb"], info["avail_mb"])
+    # Persist only the MemTotal hard ceiling. Live MemAvailable is applied at engine start.
+    total = meminfo()["total_mb"]
+    if total:
+        cfg["cpu_percent"] = min(cfg["cpu_percent"], max_cpu_percent(total))
+        cfg["memory_mb"] = min(cfg["memory_mb"], memory_hard_ceiling(total))
 
 
 def _prepare_for_write(cfg: dict[str, Any]) -> None:
