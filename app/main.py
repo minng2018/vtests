@@ -5,24 +5,40 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import os
-import secrets
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+
+from app.config import (
+    VALID_MODES,
+    capped_cpu_mem,
+    load_config,
+    max_cpu_percent,
+    max_memory_mb,
+    public_config,
+    save_config,
+    sync_legacy_from_mode,
+    update_config,
+)
+from app.metrics import CpuSampler, cpu_count, meminfo
+from app.scheduler import apply_start, apply_stop, in_window, normalize_hhmm, should_run
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -35,153 +51,6 @@ def _version() -> str:
         return VERSION_FILE.read_text(encoding="utf-8").strip() or "0.0.0"
     except OSError:
         return "0.0.0"
-
-
-def config_path() -> Path:
-    env = os.environ.get("VTESTS_CONFIG")
-    if env:
-        return Path(env)
-    etc = Path("/etc/vtests/config.json")
-    if etc.exists() or os.geteuid() == 0:
-        return etc
-    path = ROOT.parent / "data" / "config.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def meminfo() -> dict[str, int]:
-    data: dict[str, int] = {}
-    with open("/proc/meminfo", encoding="utf-8") as fh:
-        for line in fh:
-            parts = line.split()
-            if len(parts) >= 2:
-                data[parts[0].rstrip(":")] = int(parts[1])
-    total = data.get("MemTotal", 0) // 1024
-    avail = data.get("MemAvailable", data.get("MemFree", 0)) // 1024
-    return {"total_mb": total, "avail_mb": avail, "used_mb": max(0, total - avail)}
-
-
-def cpu_count() -> int:
-    return os.cpu_count() or 1
-
-
-def max_memory_mb(total_mb: int) -> int:
-    leave = 512 if total_mb <= 2048 else max(512, int(total_mb * 0.2))
-    return max(0, total_mb - leave)
-
-
-def default_config() -> dict[str, Any]:
-    total = meminfo()["total_mb"]
-    mem_default = min(128, max_memory_mb(total)) if total else 128
-    return {
-        "listen": "0.0.0.0",
-        "port": 8088,
-        "base_path": "/" + secrets.token_urlsafe(6).rstrip("="),
-        "password": secrets.token_urlsafe(12),
-        "secret": secrets.token_hex(16),
-        "cpu_percent": 20,
-        "memory_mb": mem_default,
-        "schedule_enabled": False,
-        "schedule_start": "09:00",
-        "schedule_end": "22:00",
-        "timezone": "Asia/Shanghai",
-        "enabled": False,
-        "paused": False,
-    }
-
-
-def load_config() -> dict[str, Any]:
-    path = config_path()
-    cfg = default_config()
-    if path.exists():
-        try:
-            saved = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(saved, dict):
-                cfg.update(saved)
-        except (OSError, json.JSONDecodeError):
-            pass
-    else:
-        save_config(cfg)
-    cfg["cpu_percent"] = int(max(0, min(100, int(cfg.get("cpu_percent", 20)))))
-    cfg["memory_mb"] = int(max(0, int(cfg.get("memory_mb", 0))))
-    cfg["port"] = int(cfg.get("port", 8088))
-    base = str(cfg.get("base_path") or "/").strip() or "/"
-    if not base.startswith("/"):
-        base = "/" + base
-    cfg["base_path"] = base.rstrip("/") or ""
-    return cfg
-
-
-def save_config(cfg: dict[str, Any]) -> None:
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.chmod(0o600)
-    tmp.replace(path)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def parse_hhmm(value: str) -> tuple[int, int]:
-    parts = (value or "00:00").split(":")
-    return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-
-
-def in_window(cfg: dict[str, Any], now: datetime | None = None) -> bool:
-    tz_name = cfg.get("timezone") or "Asia/Shanghai"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = ZoneInfo("UTC")
-    current = now.astimezone(tz) if now else datetime.now(tz)
-    sh, sm = parse_hhmm(str(cfg.get("schedule_start") or "09:00"))
-    eh, em = parse_hhmm(str(cfg.get("schedule_end") or "22:00"))
-    start = sh * 60 + sm
-    end = eh * 60 + em
-    cur = current.hour * 60 + current.minute
-    if start == end:
-        return True
-    if start < end:
-        return start <= cur < end
-    return cur >= start or cur < end
-
-
-def should_run(cfg: dict[str, Any]) -> bool:
-    if cfg.get("paused"):
-        return False
-    if cfg.get("schedule_enabled"):
-        return bool(in_window(cfg))
-    return bool(cfg.get("enabled"))
-
-
-class CpuSampler:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._prev: tuple[int, int] | None = None
-
-    def _snap(self) -> tuple[int, int]:
-        with open("/proc/stat", encoding="utf-8") as fh:
-            parts = fh.readline().split()
-        nums = [int(x) for x in parts[1:]]
-        total = sum(nums)
-        idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
-        return total, idle
-
-    def percent(self) -> float:
-        with self._lock:
-            cur = self._snap()
-            if self._prev is None:
-                self._prev = cur
-                return 0.0
-            dt = cur[0] - self._prev[0]
-            di = cur[1] - self._prev[1]
-            self._prev = cur
-            if dt <= 0:
-                return 0.0
-            return max(0.0, min(100.0, (1.0 - di / dt) * 100.0))
 
 
 class LoadEngine:
@@ -204,11 +73,8 @@ class LoadEngine:
         if not binary:
             self._error = "未找到 stress-ng，请安装后重启服务"
             return
-        cpu = int(cfg.get("cpu_percent") or 0)
-        mem = int(cfg.get("memory_mb") or 0)
-        cap = max_memory_mb(meminfo()["total_mb"])
-        if mem > cap:
-            mem = cap
+        info = meminfo()
+        cpu, mem = capped_cpu_mem(dict(cfg), info["total_mb"], info["avail_mb"])
         cmd = [binary, "--timeout", "0"]
         if cpu > 0:
             cmd.extend(["--cpu", "0", "--cpu-load", str(cpu), "--cpu-method", "nop"])
@@ -280,16 +146,20 @@ class Watchdog:
     def _loop(self) -> None:
         while not self._stop.wait(2):
             cfg = load_config()
-            window = in_window(cfg) if cfg.get("schedule_enabled") else None
-            if cfg.get("schedule_enabled") and self._last_in_window is False and window:
-                cfg["paused"] = False
-                cfg["enabled"] = True
-                save_config(cfg)
-            if cfg.get("schedule_enabled") and self._last_in_window is True and window is False:
-                cfg["enabled"] = False
-                save_config(cfg)
-            if window is not None:
-                self._last_in_window = window
+            window = in_window(cfg)
+            if (
+                cfg.get("mode") == "schedule"
+                and self._last_in_window is False
+                and window
+                and cfg.get("paused_until_next_window")
+            ):
+                def _clear_pause(cur: dict[str, Any]) -> None:
+                    if cur.get("mode") == "schedule" and cur.get("paused_until_next_window"):
+                        cur["paused_until_next_window"] = False
+                        sync_legacy_from_mode(cur)
+
+                cfg = update_config(_clear_pause)
+            self._last_in_window = window
             want = should_run(cfg)
             alive = self.engine.alive()
             if want and not alive:
@@ -390,22 +260,9 @@ async def api_status(request: Request):
         "mem": mem,
         "loadavg": [round(x, 2) for x in loadavg],
         "in_window": in_window(cfg),
-        "max_memory_mb": max_memory_mb(mem["total_mb"]),
+        "max_memory_mb": max_memory_mb(mem["total_mb"], mem["avail_mb"]),
+        "max_cpu_percent": max_cpu_percent(mem["total_mb"]),
         "config": public_config(cfg),
-    }
-
-
-def public_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "cpu_percent": int(cfg.get("cpu_percent") or 0),
-        "memory_mb": int(cfg.get("memory_mb") or 0),
-        "schedule_enabled": bool(cfg.get("schedule_enabled")),
-        "schedule_start": cfg.get("schedule_start") or "09:00",
-        "schedule_end": cfg.get("schedule_end") or "22:00",
-        "timezone": cfg.get("timezone") or "Asia/Shanghai",
-        "enabled": bool(cfg.get("enabled")),
-        "paused": bool(cfg.get("paused")),
-        "port": int(cfg.get("port") or 8088),
     }
 
 
@@ -448,26 +305,63 @@ async def api_config(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
-    cfg = load_config()
+
     if "cpu_percent" in body:
-        cfg["cpu_percent"] = int(max(0, min(100, int(body["cpu_percent"]))))
+        try:
+            int(body["cpu_percent"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "cpu_percent 无效"}, status_code=400)
     if "memory_mb" in body:
-        mem = int(max(0, int(body["memory_mb"])))
-        cfg["memory_mb"] = min(mem, max_memory_mb(meminfo()["total_mb"]))
-    if "schedule_enabled" in body:
-        cfg["schedule_enabled"] = bool(body["schedule_enabled"])
+        try:
+            int(body["memory_mb"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "memory_mb 无效"}, status_code=400)
     if "schedule_start" in body:
-        cfg["schedule_start"] = str(body["schedule_start"])
+        if normalize_hhmm(str(body["schedule_start"])) is None:
+            return JSONResponse({"ok": False, "error": "开始时间无效"}, status_code=400)
     if "schedule_end" in body:
-        cfg["schedule_end"] = str(body["schedule_end"])
+        if normalize_hhmm(str(body["schedule_end"])) is None:
+            return JSONResponse({"ok": False, "error": "结束时间无效"}, status_code=400)
     if "timezone" in body:
         tz = str(body["timezone"] or "Asia/Shanghai")
         try:
             ZoneInfo(tz)
-            cfg["timezone"] = tz
         except Exception:
             return JSONResponse({"ok": False, "error": "时区无效"}, status_code=400)
-    save_config(cfg)
+    if "mode" in body and str(body["mode"]) not in VALID_MODES:
+        return JSONResponse({"ok": False, "error": "mode 无效"}, status_code=400)
+
+    def mutate(cfg: dict[str, Any]) -> None:
+        if "cpu_percent" in body:
+            cfg["cpu_percent"] = int(max(0, min(100, int(body["cpu_percent"]))))
+        if "memory_mb" in body:
+            cfg["memory_mb"] = int(max(0, int(body["memory_mb"])))
+        if "schedule_start" in body:
+            cfg["schedule_start"] = normalize_hhmm(str(body["schedule_start"])) or str(
+                body["schedule_start"]
+            )
+        if "schedule_end" in body:
+            cfg["schedule_end"] = normalize_hhmm(str(body["schedule_end"])) or str(body["schedule_end"])
+        if "timezone" in body:
+            cfg["timezone"] = str(body["timezone"] or "Asia/Shanghai")
+        if "mode" in body:
+            mode = str(body["mode"])
+            cfg["mode"] = mode
+            if mode != "schedule":
+                cfg["paused_until_next_window"] = False
+        elif "schedule_enabled" in body:
+            if body["schedule_enabled"]:
+                if cfg.get("mode") != "schedule":
+                    cfg["paused_until_next_window"] = False
+                cfg["mode"] = "schedule"
+            elif cfg.get("mode") == "schedule":
+                cfg["mode"] = "off"
+                cfg["paused_until_next_window"] = False
+        if "paused_until_next_window" in body:
+            cfg["paused_until_next_window"] = bool(body["paused_until_next_window"])
+        sync_legacy_from_mode(cfg)
+
+    cfg = update_config(mutate)
     if should_run(cfg):
         ENGINE.start(cfg)
     else:
@@ -479,10 +373,7 @@ async def api_config(request: Request):
 async def api_start(request: Request):
     if not authorized(request):
         return deny()
-    cfg = load_config()
-    cfg["enabled"] = True
-    cfg["paused"] = False
-    save_config(cfg)
+    cfg = update_config(apply_start)
     ENGINE.start(cfg)
     return {"ok": True, "running": ENGINE.alive(), "error": ENGINE.error()}
 
@@ -491,10 +382,7 @@ async def api_start(request: Request):
 async def api_stop(request: Request):
     if not authorized(request):
         return deny()
-    cfg = load_config()
-    cfg["enabled"] = False
-    cfg["paused"] = True
-    save_config(cfg)
+    update_config(apply_stop)
     ENGINE.stop()
     return {"ok": True, "running": False}
 
