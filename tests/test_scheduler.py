@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 from zoneinfo import ZoneInfo
@@ -376,3 +376,98 @@ def test_watchdog_first_tick_is_not_rising_edge(tmp_path, monkeypatch):
     assert after["enabled"] is True
     assert engine.alive() is False
     assert engine.starts == 0
+
+
+def test_all_day_pause_clears_on_local_date_rollover():
+    cfg = _cfg(
+        mode="schedule",
+        paused_until_next_window=True,
+        schedule_start="09:00",
+        schedule_end="09:00",
+        timezone="Asia/Shanghai",
+        enabled=True,
+        paused=True,
+        schedule_enabled=True,
+    )
+    same_day = datetime(2026, 6, 1, 15, 30, tzinfo=ZoneInfo("UTC"))
+    window, mutated = clear_pause_on_rising_edge(
+        cfg, True, same_day, last_local_date=date(2026, 6, 1)
+    )
+    assert window is True
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    window, mutated = clear_pause_on_rising_edge(
+        cfg, None, same_day, last_local_date=None
+    )
+    assert window is True
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    next_local_midnight = datetime(2026, 6, 1, 16, 0, tzinfo=ZoneInfo("UTC"))
+    window, mutated = clear_pause_on_rising_edge(
+        cfg, True, next_local_midnight, last_local_date=date(2026, 6, 1)
+    )
+    assert window is True
+    assert mutated is True
+    assert cfg["paused_until_next_window"] is False
+    assert cfg["paused"] is False
+    assert cfg["mode"] == "schedule"
+    assert cfg["enabled"] is True
+
+
+def test_partial_day_date_rollover_does_not_clear_pause():
+    cfg = _cfg(
+        mode="schedule",
+        paused_until_next_window=True,
+        schedule_start="09:00",
+        schedule_end="22:00",
+        timezone="UTC",
+    )
+    midnight = datetime(2026, 1, 16, 0, 0, tzinfo=ZoneInfo("UTC"))
+    window, mutated = clear_pause_on_rising_edge(
+        cfg, False, midnight, last_local_date=date(2026, 1, 15)
+    )
+    assert window is False
+    assert mutated is False
+    assert cfg["paused_until_next_window"] is True
+
+    window, mutated = clear_pause_on_rising_edge(
+        cfg, False, datetime(2026, 1, 16, 9, 0, tzinfo=ZoneInfo("UTC")),
+        last_local_date=date(2026, 1, 16),
+    )
+    assert window is True
+    assert mutated is True
+    assert cfg["paused_until_next_window"] is False
+
+
+def test_watchdog_all_day_pause_clears_at_next_local_midnight(tmp_path, monkeypatch):
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setenv("VTESTS_CONFIG", str(cfg_path))
+    save_config(
+        _cfg(
+            mode="schedule",
+            paused_until_next_window=True,
+            schedule_start="09:00",
+            schedule_end="09:00",
+            timezone="UTC",
+        )
+    )
+    engine = _FakeEngine()
+    wd = Watchdog(engine)
+    wd.tick(now=_at(12, 0))
+    assert load_config()["paused_until_next_window"] is True
+    assert engine.alive() is False
+
+    wd.tick(now=_at(23, 59))
+    assert load_config()["paused_until_next_window"] is True
+    assert engine.alive() is False
+
+    wd.tick(now=datetime(2026, 1, 16, 0, 0, tzinfo=ZoneInfo("UTC")))
+    loaded = load_config()
+    assert loaded["paused_until_next_window"] is False
+    assert loaded["paused"] is False
+    assert loaded["mode"] == "schedule"
+    assert loaded["enabled"] is True
+    assert engine.alive() is True
+    assert engine.starts == 1

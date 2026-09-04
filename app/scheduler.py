@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,17 +38,28 @@ def normalize_hhmm(value: str) -> str | None:
     return text[:5]
 
 
-def in_window(cfg: dict[str, Any], now: datetime | None = None) -> bool:
+def _cfg_tz(cfg: dict[str, Any]) -> ZoneInfo:
     tz_name = cfg.get("timezone") or "Asia/Shanghai"
     try:
-        tz = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except Exception:
-        tz = ZoneInfo("UTC")
-    current = now.astimezone(tz) if now else datetime.now(tz)
+        return ZoneInfo("UTC")
+
+
+def _local_dt(cfg: dict[str, Any], now: datetime | None = None) -> datetime:
+    tz = _cfg_tz(cfg)
+    return now.astimezone(tz) if now else datetime.now(tz)
+
+
+def _window_minutes(cfg: dict[str, Any]) -> tuple[int, int]:
     sh, sm = parse_hhmm(str(cfg.get("schedule_start") or "09:00"))
     eh, em = parse_hhmm(str(cfg.get("schedule_end") or "22:00"))
-    start = sh * 60 + sm
-    end = eh * 60 + em
+    return sh * 60 + sm, eh * 60 + em
+
+
+def in_window(cfg: dict[str, Any], now: datetime | None = None) -> bool:
+    current = _local_dt(cfg, now)
+    start, end = _window_minutes(cfg)
     cur = current.hour * 60 + current.minute
     if start == end:
         return True
@@ -96,12 +107,19 @@ def clear_pause_on_rising_edge(
     cfg: dict[str, Any],
     last_in_window: bool | None,
     now: datetime | None = None,
+    *,
+    last_local_date: date | None = None,
 ) -> tuple[bool, bool]:
     window = in_window(cfg, now)
+    start, end = _window_minutes(cfg)
+    rose = last_in_window is False and window
+    # start==end is always in-window, so the next window is the next local date.
+    if start == end and last_local_date is not None:
+        if _local_dt(cfg, now).date() != last_local_date:
+            rose = True
     if (
         cfg.get("mode") == "schedule"
-        and last_in_window is False
-        and window
+        and rose
         and cfg.get("paused_until_next_window")
     ):
         cfg["paused_until_next_window"] = False
@@ -116,6 +134,7 @@ class Watchdog:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_in_window: bool | None = None
+        self._last_local_date: date | None = None
 
     def start(self) -> None:
         self._stop.clear()
@@ -129,15 +148,20 @@ class Watchdog:
 
     def tick(self, now: datetime | None = None) -> None:
         cfg = load_config()
-        window, mutated = clear_pause_on_rising_edge(cfg, self._last_in_window, now)
+        last_window = self._last_in_window
+        last_date = self._last_local_date
+        window, mutated = clear_pause_on_rising_edge(
+            cfg, last_window, now, last_local_date=last_date
+        )
         if mutated:
-            last = self._last_in_window
-
             def _clear_pause(cur: dict[str, Any]) -> None:
-                clear_pause_on_rising_edge(cur, last, now)
+                clear_pause_on_rising_edge(
+                    cur, last_window, now, last_local_date=last_date
+                )
 
             cfg = update_config(_clear_pause)
         self._last_in_window = window
+        self._last_local_date = _local_dt(cfg, now).date()
         want = should_run(cfg, now)
         alive = self.engine.alive()
         if want and not alive:
